@@ -46,6 +46,7 @@ jobs:
         run: |
           set -euo pipefail
           dst="$HOME/fujitsu-dashboard"
+          dashboard_path="$HOME/.local/bin:$HOME/bin:$PATH"
           tmux kill-session -t fujitsu-dashboard 2>/dev/null || true
           for pid in $(pgrep -f 'dashboard_server\.py' || true); do
             [ "$pid" = "$$" ] || kill "$pid" 2>/dev/null || true
@@ -54,7 +55,7 @@ jobs:
             if ! pgrep -f 'dashboard_server\.py' >/dev/null 2>&1; then break; fi
             sleep 0.25
           done
-          tmux new-session -d -s fujitsu-dashboard "cd '$dst' && exec python3 dashboard_server.py >> '$dst/dashboard.log' 2>&1"
+          tmux new-session -d -s fujitsu-dashboard "export PATH='$dashboard_path'; cd '$dst'; exec python3 dashboard_server.py >> '$dst/dashboard.log' 2>&1"
           for _ in $(seq 1 30); do
             if curl -fsS --max-time 2 http://127.0.0.1:9860/healthz | grep -q '^ok'; then
               echo DASHBOARD_HEALTHZ_OK=1
@@ -66,11 +67,49 @@ jobs:
           tail -n 80 "$dst/dashboard.log" || true
           exit 1
 
+      - name: Wait for Hermes and runner cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          ready=0
+          for _ in $(seq 1 30); do
+            if curl -fsS --max-time 20 http://127.0.0.1:9860/api/status -o /tmp/fujitsu-dashboard-status.json; then
+              if python3 - <<'PY'
+          import json
+          d=json.load(open('/tmp/fujitsu-dashboard-status.json'))
+          s=d.get('summary') or {}
+          h=d.get('hermes') or {}
+          raise SystemExit(0 if s.get('runner_total') == 9 and h.get('ready') else 1)
+          PY
+              then
+                ready=1
+                break
+              fi
+            fi
+            sleep 4
+          done
+          if [ "$ready" -ne 1 ]; then
+            echo 'Dashboard cache did not become ready in time'
+            python3 - <<'PY'
+          import json
+          try:
+              d=json.load(open('/tmp/fujitsu-dashboard-status.json'))
+              print('summary=', d.get('summary'))
+              print('hermes=', d.get('hermes'))
+              print('github=', d.get('github'))
+              print('repos=', [p.get('repo') for p in d.get('projects',[])])
+          except Exception as e:
+              print('status_read_error=', type(e).__name__)
+          PY
+            tail -n 120 "$HOME/fujitsu-dashboard/dashboard.log" || true
+            exit 1
+          fi
+          echo DASHBOARD_CACHE_READY=1
+
       - name: Verify Hermes and every local runner in API
         shell: bash
         run: |
           set -euo pipefail
-          sleep 18
           curl -fsS --max-time 20 http://127.0.0.1:9860/api/status -o /tmp/fujitsu-dashboard-status.json
           python3 - <<'PY'
           import json
