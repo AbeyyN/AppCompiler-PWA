@@ -1,0 +1,119 @@
+name: Deploy Fujitsu Dashboard v3
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'infra/fujitsu-dashboard/**'
+      - '.github/workflows/deploy-fujitsu-dashboard-v3.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, linux, x64, fujitsu, pwa, central]
+    timeout-minutes: 8
+    steps:
+      - name: Checkout dashboard source
+        uses: actions/checkout@v4
+
+      - name: Validate dashboard source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile infra/fujitsu-dashboard/dashboard_server.py
+          test -s infra/fujitsu-dashboard/index.html
+          grep -q 'Hermes 986 CI Doctor' infra/fujitsu-dashboard/index.html
+          grep -q 'discover_local_runners' infra/fujitsu-dashboard/dashboard_server.py
+
+      - name: Backup and install dashboard v3
+        shell: bash
+        run: |
+          set -euo pipefail
+          dst="$HOME/fujitsu-dashboard"
+          mkdir -p "$dst/backups"
+          stamp="$(date +%Y%m%d-%H%M%S)"
+          [ ! -f "$dst/dashboard_server.py" ] || cp "$dst/dashboard_server.py" "$dst/backups/dashboard_server.py.$stamp"
+          [ ! -f "$dst/index.html" ] || cp "$dst/index.html" "$dst/backups/index.html.$stamp"
+          install -m 755 infra/fujitsu-dashboard/dashboard_server.py "$dst/dashboard_server.py"
+          install -m 644 infra/fujitsu-dashboard/index.html "$dst/index.html"
+          python3 -m py_compile "$dst/dashboard_server.py"
+
+      - name: Restart Fujitsu dashboard safely
+        shell: bash
+        run: |
+          set -euo pipefail
+          dst="$HOME/fujitsu-dashboard"
+          tmux kill-session -t fujitsu-dashboard 2>/dev/null || true
+          for pid in $(pgrep -f 'dashboard_server\.py' || true); do
+            [ "$pid" = "$$" ] || kill "$pid" 2>/dev/null || true
+          done
+          for _ in $(seq 1 20); do
+            if ! pgrep -f 'dashboard_server\.py' >/dev/null 2>&1; then break; fi
+            sleep 0.25
+          done
+          tmux new-session -d -s fujitsu-dashboard "cd '$dst' && exec python3 dashboard_server.py >> '$dst/dashboard.log' 2>&1"
+          for _ in $(seq 1 30); do
+            if curl -fsS --max-time 2 http://127.0.0.1:9860/healthz | grep -q '^ok'; then
+              echo DASHBOARD_HEALTHZ_OK=1
+              exit 0
+            fi
+            sleep 1
+          done
+          echo 'Dashboard failed to become healthy'
+          tail -n 80 "$dst/dashboard.log" || true
+          exit 1
+
+      - name: Verify Hermes and every local runner in API
+        shell: bash
+        run: |
+          set -euo pipefail
+          sleep 18
+          curl -fsS --max-time 20 http://127.0.0.1:9860/api/status -o /tmp/fujitsu-dashboard-status.json
+          python3 - <<'PY'
+          import json
+          d=json.load(open('/tmp/fujitsu-dashboard-status.json'))
+          s=d.get('summary') or {}
+          h=d.get('hermes') or {}
+          projects=d.get('projects') or []
+          runners=[(p.get('repo'),r.get('name')) for p in projects for r in p.get('runners',[])]
+          expected={
+            ('XHomeNetwork','Fujitsu-Ubuntu'),
+            ('SK-Gong-Kapas','Fujitsu-Ubuntu'),
+            ('XMA7','Fujitsu-Ubuntu'),
+            ('XSAHub','Fujitsu-Ubuntu'),
+            ('X7-Core-Academy','Fujitsu-Ubuntu'),
+            ('OpenWRT---AbeyyWRT','Fujitsu-Ubuntu'),
+            ('OpenWRT---AbeyyWRT','Fujitsu-Ubuntu-Light'),
+            ('AppCompiler-PWA','Fujitsu-PWA'),
+            ('AppCompiler-PWA','Fujitsu-PWA-01'),
+          }
+          missing=sorted(expected-set(runners))
+          print('dashboard_version=v3')
+          print('repo_total=',s.get('repo_total'))
+          print('runner_total=',s.get('runner_total'))
+          print('runner_online=',s.get('runner_online'))
+          print('local_listeners=',s.get('local_listeners'))
+          print('hermes_ready=',h.get('ready'))
+          print('hermes_version=',h.get('version'))
+          print('hermes_provider=',h.get('provider'))
+          print('hermes_model=',h.get('model'))
+          print('runner_names=', ', '.join(f'{repo}:{name}' for repo,name in runners))
+          if missing:
+              raise SystemExit('missing runners: '+repr(missing))
+          if s.get('runner_total') != 9:
+              raise SystemExit(f"expected 9 runners, got {s.get('runner_total')}")
+          if not h.get('ready'):
+              raise SystemExit('Hermes dashboard status is not ready')
+          PY
+
+      - name: Confirm dashboard process
+        shell: bash
+        run: |
+          set -euo pipefail
+          pgrep -f 'dashboard_server\.py' >/dev/null
+          tmux has-session -t fujitsu-dashboard
+          curl -fsS --max-time 5 http://127.0.0.1:9860/ | grep -q 'FUJITSU Runner Fleet'
+          echo FUJITSU_DASHBOARD_V3_READY=1
