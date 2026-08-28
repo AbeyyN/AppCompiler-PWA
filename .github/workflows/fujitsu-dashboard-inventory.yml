@@ -1,0 +1,61 @@
+name: Fujitsu Dashboard Inventory
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/fujitsu-dashboard-inventory.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: [self-hosted, linux, x64, fujitsu, pwa, central]
+    timeout-minutes: 5
+    steps:
+      - name: Inspect dashboard and runners safely
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "host=$(hostname) user=$(id -un)"
+          echo '=== DASHBOARD PROCESS ==='
+          for pid in $(pgrep -f 'dashboard_server\.py' || true); do
+            echo "dashboard_pid=$pid"
+            echo "dashboard_cwd=$(readlink -f /proc/$pid/cwd 2>/dev/null || true)"
+          done
+
+          echo '=== DASHBOARD FILES ==='
+          find "$HOME" -maxdepth 6 -type f \
+            \( -name 'dashboard_server.py' -o -iname '*dashboard*.html' -o -iname '*dashboard*.css' -o -iname '*dashboard*.js' \) \
+            -print 2>/dev/null | head -100
+
+          echo '=== RUNNER CONFIGS ==='
+          while IFS= read -r f; do
+            echo "runner_config=$f"
+            python3 - "$f" <<'PY'
+          import json,sys,os
+          p=sys.argv[1]
+          try:
+              d=json.load(open(p, encoding='utf-8'))
+          except Exception as e:
+              print('parse_error='+type(e).__name__)
+              raise SystemExit
+          safe={k:d.get(k) for k in ('agentName','workFolder','poolId','poolName','serverUrl','gitHubUrl') if k in d}
+          print('runner_safe='+json.dumps(safe, sort_keys=True))
+          print('runner_dir='+os.path.dirname(p))
+          PY
+          done < <(find "$HOME" -maxdepth 6 -type f -name '.runner' -print 2>/dev/null | sort)
+
+          echo '=== RUNNER LISTENER CWD ==='
+          for pid in $(pgrep -f 'Runner\.Listener' || true); do
+            echo "listener_pid=$pid cwd=$(readlink -f /proc/$pid/cwd 2>/dev/null || true)"
+          done
+
+          echo '=== DASHBOARD SOURCE PREVIEW ==='
+          dash=$(find "$HOME" -maxdepth 6 -type f -name 'dashboard_server.py' -print -quit 2>/dev/null || true)
+          if [ -n "$dash" ]; then
+            echo "dashboard_source=$dash"
+            sed -n '1,260p' "$dash"
+          fi
