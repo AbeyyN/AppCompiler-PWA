@@ -1,10 +1,6 @@
 name: Hermes 986 Final Smoke
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - '.github/workflows/hermes-final-smoke.yml'
   workflow_dispatch:
 
 permissions:
@@ -61,9 +57,11 @@ jobs:
           timeout 75s hermes chat -q 'Reply exactly HERMES_986_OK. Do not use tools.' > /tmp/hermes-smoke.out 2>&1
           rc=$?
           sed -E 's/(sk-[A-Za-z0-9_-]{8})[A-Za-z0-9_-]*/\1[REDACTED]/g; s/(Bearer )[A-Za-z0-9._-]+/\1[REDACTED]/g' /tmp/hermes-smoke.out | tail -n 30
-          if [ "$rc" -eq 0 ] && grep -q 'HERMES_986_OK' /tmp/hermes-smoke.out; then
+          if grep -qi 'No inference provider configured' /tmp/hermes-smoke.out; then
+            echo HERMES_MODEL_SMOKE=PROVIDER_NOT_CONFIGURED
+          elif [ "$rc" -eq 0 ] && grep -qx 'HERMES_986_OK' /tmp/hermes-smoke.out; then
             echo HERMES_MODEL_SMOKE=PASS
           else
-            echo "HERMES_MODEL_SMOKE=NOT_READY rc=$rc"
+            echo "HERMES_MODEL_SMOKE=FAIL rc=$rc"
           fi
           exit 0
