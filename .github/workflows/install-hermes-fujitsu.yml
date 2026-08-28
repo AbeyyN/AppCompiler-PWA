@@ -1,0 +1,80 @@
+name: Install Hermes 986 CI Doctor
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/install-hermes-fujitsu.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    runs-on: [self-hosted, linux, x64, fujitsu, pwa, central]
+    timeout-minutes: 30
+    env:
+      HERMES_COMMIT: 00bbfc690060d1323ddb2f065297c7425cb71c26
+    steps:
+      - name: Install and configure Hermes
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "runner=${RUNNER_NAME:-unknown} host=$(hostname) user=$(id -un) home=$HOME"
+          export PATH="$HOME/.local/bin:$PATH"
+          command -v git
+          command -v curl
+          command -v g++ || command -v clang++ || { echo 'Missing C++ compiler'; exit 20; }
+          mkdir -p "$HOME/.cache"
+          exec 9>"$HOME/.cache/986-hermes-install.lock"
+          flock -w 180 9
+
+          current=""
+          if [ -d "$HOME/.hermes/hermes-agent/.git" ]; then
+            current="$(git -C "$HOME/.hermes/hermes-agent" rev-parse HEAD 2>/dev/null || true)"
+          fi
+          if [ "$current" != "$HERMES_COMMIT" ]; then
+            installer="$(mktemp)"
+            trap 'rm -f "$installer"' EXIT
+            curl --proto '=https' --tlsv1.2 -fsSL https://hermes-agent.nousresearch.com/install.sh -o "$installer"
+            head -n1 "$installer" | grep -q '^#!/bin/bash'
+            bash "$installer" --commit "$HERMES_COMMIT" --skip-setup --non-interactive --skip-browser --skip-computer-use
+          else
+            echo "Pinned Hermes already installed"
+          fi
+
+          export PATH="$HOME/.local/bin:$PATH"
+          chmod 700 "$HOME/.hermes"
+          [ ! -f "$HOME/.hermes/.env" ] || chmod 600 "$HOME/.hermes/.env"
+          [ ! -f "$HOME/.hermes/auth.json" ] || chmod 600 "$HOME/.hermes/auth.json"
+
+          workspace="$HOME/hermes-workspaces/986-ci-doctor"
+          mkdir -p "$workspace/logs" "$HOME/bin"
+          cat > "$workspace/.hermes.md" <<'EOF'
+          # 986Network CI Doctor
+          You diagnose GitHub Actions and FUJITSU-BUILD failures using minimal, reversible changes.
+          Inspect logs first and verify the root cause before changing anything.
+          Check runner health, PATH, disk, Git, Java, Flutter, Android SDK and Gradle when relevant.
+          Do not use sudo/root without explicit human approval.
+          Never expose credentials, signing keys, SSH private keys, tokens, auth files, or .env secrets.
+          Never modify ~/.ssh, runner registration, firewall/router/NAS configuration, boot/storage layout, or Hermes security settings without explicit approval.
+          Never force-push, rewrite history, or delete branches, tags, releases or repositories.
+          Default to read/diagnose/test. Explain repository changes before write/push and require explicit approval.
+          EOF
+
+          cat > "$HOME/bin/hermes986" <<'EOF'
+          #!/usr/bin/env bash
+          set -e
+          export PATH="$HOME/.local/bin:$PATH"
+          cd "$HOME/hermes-workspaces/986-ci-doctor"
+          exec hermes "$@"
+          EOF
+          chmod 755 "$HOME/bin/hermes986"
+          hermes config set terminal.cwd "$workspace" || true
+
+          command -v hermes
+          hermes --version
+          test "$(git -C "$HOME/.hermes/hermes-agent" rev-parse HEAD)" = "$HERMES_COMMIT"
+          hermes doctor || true
+          echo HERMES_986_RUNTIME_READY
