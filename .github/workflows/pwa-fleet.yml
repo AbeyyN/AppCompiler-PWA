@@ -1,0 +1,30 @@
+name: AppCompiler PWA Fleet
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/5 * * * *'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: appcompiler-pwa-fleet
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Detect + Build Changed PWAs
+    runs-on: [self-hosted, linux, x64, fujitsu, pwa, central]
+    timeout-minutes: 75
+    steps:
+      - name: Checkout PWA fleet
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Build changed PWA projects
+        shell: bash
+        env:
+          FUJITSU_BUILD_CLASS: light
+        run: bash scripts/build-fleet.sh
