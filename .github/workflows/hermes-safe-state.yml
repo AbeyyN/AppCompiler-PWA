@@ -1,0 +1,42 @@
+name: Hermes Safe State
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/hermes-safe-state.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: [self-hosted, linux, x64, fujitsu, pwa, central]
+    timeout-minutes: 4
+    steps:
+      - name: Safe state only
+        shell: bash
+        run: |
+          set -u
+          export PATH="$HOME/.local/bin:$PATH"
+          echo "host=$(hostname) user=$(id -un)"
+          echo "hermes_home_size=$(du -sh "$HOME/.hermes" 2>/dev/null | awk '{print $1}' || true)"
+          if [ -d "$HOME/.hermes/hermes-agent/.git" ]; then
+            echo HERMES_REPO_PRESENT=1
+            git -C "$HOME/.hermes/hermes-agent" rev-parse HEAD || true
+          else
+            echo HERMES_REPO_PRESENT=0
+          fi
+          if command -v hermes >/dev/null 2>&1; then
+            echo HERMES_COMMAND_PRESENT=1
+            hermes --version || true
+          else
+            echo HERMES_COMMAND_PRESENT=0
+          fi
+          if [ -x "$HOME/.hermes/venv/bin/python" ]; then
+            echo HERMES_VENV_PRESENT=1
+          else
+            echo HERMES_VENV_PRESENT=0
+          fi
+          echo 'No process command lines or credentials were inspected.'
