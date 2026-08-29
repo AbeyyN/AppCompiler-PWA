@@ -28,9 +28,12 @@ build_x7() {
   cd "$tmp/src/apps/x7-kids-academy/unified"
   flutter create . --platforms=web --org my.abeyytechxy --project-name x7kidsacademy
   flutter pub get
-  flutter analyze
-  flutter test
-  fujitsu-build-lock flutter build web --release --base-href /AppCompiler-PWA/x7/
+  FUJITSU_BUILD_CLASS=light fujitsu-build-lock bash -lc '
+    set -euo pipefail
+    flutter analyze
+    flutter test
+    flutter build web --release --base-href /AppCompiler-PWA/x7/
+  '
   rm -rf "$ROOT/x7"; mkdir -p "$ROOT/x7"; cp -a build/web/. "$ROOT/x7/"
   cp "$ROOT/x7/index.html" "$ROOT/x7/404.html" || true
   set_new x7 "$sha"
@@ -58,9 +61,12 @@ build_sk() {
   cd "$tmp/src"
   flutter create . --platforms=web --org my.abeyytechxy --project-name sk_gong_kapas
   flutter pub get
-  flutter analyze
-  flutter test
-  fujitsu-build-lock flutter build web --release --base-href /AppCompiler-PWA/sk-gong-kapas/
+  FUJITSU_BUILD_CLASS=light fujitsu-build-lock bash -lc '
+    set -euo pipefail
+    flutter analyze
+    flutter test
+    flutter build web --release --base-href /AppCompiler-PWA/sk-gong-kapas/
+  '
   rm -rf "$ROOT/sk-gong-kapas"; mkdir -p "$ROOT/sk-gong-kapas"; cp -a build/web/. "$ROOT/sk-gong-kapas/"
   cp "$ROOT/sk-gong-kapas/index.html" "$ROOT/sk-gong-kapas/404.html" || true
   set_new sk-gong-kapas "$sha"
@@ -80,8 +86,11 @@ build_xsahub() {
   python3 tool/prepare_source.py
   python3 tool/prepare_web.py
   flutter pub get
-  flutter analyze --no-fatal-infos --no-fatal-warnings
-  fujitsu-build-lock flutter build web --release --base-href /AppCompiler-PWA/xsahub/
+  FUJITSU_BUILD_CLASS=light fujitsu-build-lock bash -lc '
+    set -euo pipefail
+    flutter analyze --no-fatal-infos --no-fatal-warnings
+    flutter build web --release --base-href /AppCompiler-PWA/xsahub/
+  '
   rm -rf "$ROOT/xsahub"; mkdir -p "$ROOT/xsahub"; cp -a build/web/. "$ROOT/xsahub/"
   cp "$ROOT/xsahub/index.html" "$ROOT/xsahub/404.html" || true
   set_new xsahub "$sha"
