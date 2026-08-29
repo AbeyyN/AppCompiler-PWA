@@ -1,0 +1,65 @@
+name: Fujitsu Safe Host Tune
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/fujitsu-safe-host-tune.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tune:
+    name: Apply live-safe Gradle Git and listener tuning
+    runs-on: [self-hosted, linux, x64, fujitsu, pwa, central]
+    timeout-minutes: 10
+    steps:
+      - name: Apply optimized Gradle profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /home/abeyy/.gradle
+          cat > /home/abeyy/.gradle/gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx3072m -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8
+          org.gradle.daemon=true
+          org.gradle.parallel=false
+          org.gradle.caching=true
+          org.gradle.vfs.watch=true
+          org.gradle.workers.max=2
+          kotlin.incremental=true
+          EOF
+          grep -q '^org.gradle.workers.max=2$' /home/abeyy/.gradle/gradle.properties
+
+      - name: Stabilize GitHub transport over WSL
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config --global http.version HTTP/1.1
+          git config --global http.lowSpeedLimit 512
+          git config --global http.lowSpeedTime 30
+          git config --global fetch.parallel 2
+          git config --global gc.auto 0
+          test "$(git config --global --get http.version)" = 'HTTP/1.1'
+
+      - name: Restart any missing registered listeners
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -x /home/abeyy/bin/start-all-github-runners.sh ]; then
+            /home/abeyy/bin/start-all-github-runners.sh || true
+          fi
+          sleep 3
+          echo "Listeners alive: $(pgrep -fc 'Runner.Listener run' || true)"
+
+      - name: Host snapshot
+        shell: bash
+        run: |
+          echo "CPU threads: $(nproc)"
+          free -h
+          df -h /
+          echo 'Gradle:'
+          cat /home/abeyy/.gradle/gradle.properties
+          echo 'Git HTTP:'
+          git config --global --get http.version
