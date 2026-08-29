@@ -21,7 +21,8 @@ jobs:
       - name: Checkout PWA fleet
         uses: actions/checkout@v5
         with:
-          fetch-depth: 0
+          fetch-depth: 1
+          clean: false
 
       - name: Build changed PWA projects
         shell: bash
