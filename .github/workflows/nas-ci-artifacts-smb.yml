@@ -15,7 +15,7 @@ jobs:
     runs-on: [self-hosted, linux, x64, fujitsu, pwa, central]
     timeout-minutes: 10
     steps:
-      - name: Inspect NAS Samba and CI artifact root
+      - name: Inspect OMV schema for CI artifacts share
         shell: bash
         run: |
           set -euo pipefail
@@ -23,16 +23,10 @@ jobs:
           ssh -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new abeyy@192.168.1.99 'bash -s' <<'REMOTE'
           set +e
           root='/srv/dev-disk-by-uuid-e93f7a21-4a78-4f73-997a-78c11f6c647d/CI-Artifacts'
-          echo '--- HOST ---'; hostname; uname -a
-          echo '--- CI ROOT ---'; ls -ld "$root" "$root/OpenWrt" "$root/OpenWrt/AbeyyWRT" 2>&1
-          find "$root" -maxdepth 3 -mindepth 1 -type d -printf '%M %u:%g %p\n' 2>/dev/null | head -100
-          echo '--- USERS ---'; getent passwd | awk -F: '$3>=1000 && $3<65534 {print $1 ":" $3 ":" $4 ":" $6}'
-          echo '--- GROUPS ---'; getent group | grep -E '^(users|sambashare|nzrl|abeyy):' || true
-          echo '--- SAMBA USERS ---'; sudo -n pdbedit -L 2>&1 | sed -E 's/:.*$//' | sort -u
-          echo '--- SMB SERVICE ---'; systemctl is-active smbd 2>&1 || true; systemctl is-active nmbd 2>&1 || true
-          echo '--- TESTPARM ---'; sudo -n testparm -s 2>&1 | sed -n '1,320p'
-          echo '--- SMB CONF INCLUDES ---'; sudo -n grep -RniE '^\s*include\s*=|CI-Artifacts|NAS-Storage|Photos-' /etc/samba /etc/openmediavault 2>/dev/null | head -180
-          echo '--- OMV SMB SHARES ---'; command -v omv-confdbadm >/dev/null 2>&1 && sudo -n omv-confdbadm read conf.service.smb.share 2>&1 | head -360
-          echo '--- OMV SHARED FOLDERS ---'; command -v omv-confdbadm >/dev/null 2>&1 && sudo -n omv-confdbadm read conf.system.sharedfolder 2>&1 | head -360
-          echo '--- STORAGE ---'; df -hT | sed -n '1,140p'
+          echo '--- CI ROOT ---'; ls -ld "$root"; find "$root" -maxdepth 3 -mindepth 1 -type d -printf '%M %u:%g %p\n' | head -100
+          echo '--- OMV CONFDB HELP ---'; sudo -n omv-confdbadm --help 2>&1 | head -160
+          echo '--- OMV SHARED FOLDERS CORRECT READ ---'; sudo -n omv-confdbadm read --prettify conf.system.sharedfolder 2>&1 | head -500
+          echo '--- OMV SMB SHARES CORRECT READ ---'; sudo -n omv-confdbadm read --prettify conf.service.smb.share 2>&1 | head -500
+          echo '--- CONFIG XML SHARED FOLDER/SMB REGION ---'; sudo -n sed -n '400,620p' /etc/openmediavault/config.xml
+          echo '--- OMV SALT HELP ---'; sudo -n omv-salt --help 2>&1 | head -160
           REMOTE
