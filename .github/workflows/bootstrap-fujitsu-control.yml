@@ -1,0 +1,271 @@
+name: Bootstrap FUJITSU-CONTROL + Hermes
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'infra/fujitsu-control/**'
+      - '.github/workflows/bootstrap-fujitsu-control.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  bootstrap:
+    runs-on: [self-hosted, linux, x64, fujitsu, pwa, central]
+    timeout-minutes: 35
+    steps:
+      - name: Checkout control-plane source only
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            infra/fujitsu-control
+          sparse-checkout-cone-mode: false
+          fetch-depth: 1
+
+      - name: Install FUJITSU-CONTROL locally
+        shell: bash
+        run: |
+          set -euo pipefail
+          src="infra/fujitsu-control/fujitsu-control.py"
+          dst="$HOME/fujitsu-control"
+          mkdir -p "$dst" "$HOME/bin"
+          python3 -m py_compile "$src"
+          install -m 755 "$src" "$dst/fujitsu-control.py"
+          cat > "$HOME/bin/fujitsu-control" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          export PATH="$HOME/.local/bin:$HOME/bin:$PATH"
+          case "${1:-status}" in
+            start)
+              tmux has-session -t fujitsu-control 2>/dev/null && exit 0
+              tmux new-session -d -s fujitsu-control "export PATH='$HOME/.local/bin:$HOME/bin:$PATH'; cd '$HOME/fujitsu-control'; exec python3 fujitsu-control.py >> '$HOME/fujitsu-control/control.log' 2>&1"
+              ;;
+            restart)
+              tmux kill-session -t fujitsu-control 2>/dev/null || true
+              sleep 1
+              exec "$0" start
+              ;;
+            stop)
+              tmux kill-session -t fujitsu-control 2>/dev/null || true
+              ;;
+            status)
+              curl -fsS --max-time 3 http://127.0.0.1:9861/state || { echo 'FUJITSU-CONTROL offline'; exit 1; }
+              ;;
+            *)
+              echo "usage: fujitsu-control {start|stop|restart|status}" >&2
+              exit 2
+              ;;
+          esac
+          EOF
+          chmod 755 "$HOME/bin/fujitsu-control"
+
+          tmux kill-session -t fujitsu-control 2>/dev/null || true
+          "$HOME/bin/fujitsu-control" start
+          for _ in $(seq 1 20); do
+            if curl -fsS --max-time 2 http://127.0.0.1:9861/healthz | grep -q '^ok'; then
+              echo FUJITSU_CONTROL_LOCAL_READY=1
+              break
+            fi
+            sleep 1
+          done
+          curl -fsS --max-time 3 http://127.0.0.1:9861/healthz | grep -q '^ok'
+          curl -fsS --max-time 5 http://127.0.0.1:9860/healthz | grep -q '^ok'
+          echo 'FUJITSU-CONTROL owns dashboard supervision locally; it is not a GitHub runner.'
+
+      - name: Repair Hermes managed runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.local/bin:$HOME/bin:$PATH"
+          HERMES_HOME="$HOME/.hermes"
+          repo="$HERMES_HOME/hermes-agent"
+          mkdir -p "$HERMES_HOME" "$HOME/.local/bin" "$HOME/hermes-workspaces/986-ci-doctor/logs"
+
+          # The old install attempt waited exactly 180s on its advisory lock. This repair path
+          # is single-job and does not reuse that stale lock.
+          if [ ! -d "$repo/.git" ]; then
+            git clone --depth 1 https://github.com/NousResearch/hermes-agent.git "$repo"
+          fi
+
+          if ! command -v uv >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -LsSf https://astral.sh/uv/install.sh | sh
+            export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+          fi
+          command -v uv
+
+          cd "$repo"
+          if [ ! -x "$repo/venv/bin/python" ]; then
+            uv venv "$repo/venv" --python 3.11
+          fi
+          export VIRTUAL_ENV="$repo/venv"
+          # Re-running is intentional: it completes partial installs and adds the messaging gateway.
+          timeout 1200s uv pip install -e '.[all]'
+          test -x "$repo/venv/bin/hermes"
+          ln -sfn "$repo/venv/bin/hermes" "$HOME/.local/bin/hermes"
+          command -v hermes
+          hermes --version
+          echo HERMES_RUNTIME_INSTALLED=1
+
+      - name: Rebuild Hermes 986 CI Doctor workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.local/bin:$HOME/bin:$PATH"
+          workspace="$HOME/hermes-workspaces/986-ci-doctor"
+          mkdir -p "$workspace/logs" "$HOME/bin"
+          cat > "$workspace/.hermes.md" <<'EOF'
+          # 986Network CI Doctor
+
+          You are the local CI reliability agent for FUJITSU-BUILD.
+          Diagnose GitHub Actions and build failures using minimal, reversible changes.
+          Inspect logs and local runner state before changing anything.
+          Check runner health, network/TLS, disk, Git, Java, Flutter, Android SDK, Gradle and OpenWrt toolchains when relevant.
+          Treat FUJITSU-CONTROL as the local control plane and the GitHub runners as compile workers.
+          Prefer read/diagnose/test actions. Never reveal credentials, signing keys, tokens, auth files or .env values.
+          Never force-push, rewrite history, delete branches/releases/repos, or alter router/NAS/firewall/SSH configuration without explicit approval.
+          For repository writes, deployments, releases or destructive changes, explain the action and require explicit human approval.
+          When a CI failure is obvious, state root cause, confidence, and the smallest safe remediation.
+          EOF
+          chmod 600 "$workspace/.hermes.md"
+          cat > "$HOME/bin/hermes986" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          export PATH="$HOME/.local/bin:$HOME/bin:$PATH"
+          cd "$HOME/hermes-workspaces/986-ci-doctor"
+          exec hermes "$@"
+          EOF
+          chmod 755 "$HOME/bin/hermes986"
+          test -x "$HOME/bin/hermes986"
+          test -s "$workspace/.hermes.md"
+          echo HERMES_986_WORKSPACE_READY=1
+
+      - name: Diagnose Hermes without exposing secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.local/bin:$HOME/bin:$PATH"
+          mkdir -p "$HOME/.hermes/logs"
+          set +e
+          timeout 90s hermes doctor --fix > "$HOME/.hermes/logs/doctor-last.log" 2>&1
+          rc=$?
+          set -e
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          p=Path.home()/'.hermes/logs/doctor-last.log'
+          text=p.read_text(errors='ignore') if p.exists() else ''
+          text=re.sub(r'(sk-[A-Za-z0-9_-]{6})[A-Za-z0-9_-]+', r'\1[REDACTED]', text)
+          text=re.sub(r'(Bearer\s+)[A-Za-z0-9._-]+', r'\1[REDACTED]', text, flags=re.I)
+          text=re.sub(r'([0-9]{6,12}:[A-Za-z0-9_-]{8})[A-Za-z0-9_-]+', r'\1[REDACTED]', text)
+          print('\n'.join(text.splitlines()[-35:]))
+          PY
+          echo "HERMES_DOCTOR_RC=$rc"
+          hermes --version >/dev/null
+
+      - name: Verify Hermes model responds
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.local/bin:$HOME/bin:$PATH"
+          cd "$HOME/hermes-workspaces/986-ci-doctor"
+          out="$HOME/.hermes/logs/model-smoke-last.log"
+          set +e
+          timeout 150s hermes chat -q 'Reply exactly HERMES_986_OK. Do not use tools.' > "$out" 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ] && grep -q 'HERMES_986_OK' "$out"; then
+            echo HERMES_MODEL_SMOKE=PASS
+            exit 0
+          fi
+          echo "HERMES_MODEL_SMOKE=FAIL rc=$rc"
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          p=Path.home()/'.hermes/logs/model-smoke-last.log'
+          text=p.read_text(errors='ignore') if p.exists() else ''
+          text=re.sub(r'(sk-[A-Za-z0-9_-]{6})[A-Za-z0-9_-]+', r'\1[REDACTED]', text)
+          text=re.sub(r'(Bearer\s+)[A-Za-z0-9._-]+', r'\1[REDACTED]', text, flags=re.I)
+          print('\n'.join(text.splitlines()[-40:]))
+          PY
+          echo 'Hermes runtime is installed, but the configured LLM provider/model is not usable yet.' >&2
+          exit 31
+
+      - name: Verify Telegram configuration and bot API
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json, time, urllib.request
+          env={}
+          p=Path.home()/'.hermes/.env'
+          if p.exists():
+              for raw in p.read_text(errors='ignore').splitlines():
+                  line=raw.strip()
+                  if not line or line.startswith('#') or '=' not in line: continue
+                  k,v=line.split('=',1)
+                  env[k.strip()]=v.strip().strip('"').strip("'")
+          token=env.get('TELEGRAM_BOT_TOKEN','')
+          allowed=env.get('TELEGRAM_ALLOWED_USERS') or env.get('GATEWAY_ALLOWED_USERS') or ''
+          if not token:
+              raise SystemExit('TELEGRAM_BOT_TOKEN is missing from ~/.hermes/.env')
+          if not allowed:
+              raise SystemExit('Telegram allowed-user list is missing from ~/.hermes/.env')
+          url=f'https://api.telegram.org/bot{token}/getMe'
+          last=None
+          for delay in (0,2,5):
+              if delay: time.sleep(delay)
+              try:
+                  with urllib.request.urlopen(url, timeout=15) as r:
+                      data=json.loads(r.read().decode())
+                  if data.get('ok'):
+                      print('HERMES_TELEGRAM_BOT_API=PASS')
+                      raise SystemExit(0)
+                  last='Telegram API returned ok=false'
+              except SystemExit:
+                  raise
+              except Exception as e:
+                  last=type(e).__name__
+          raise SystemExit(f'Telegram bot API verification failed: {last}')
+          PY
+
+      - name: Start Hermes gateway under FUJITSU-CONTROL
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.local/bin:$HOME/bin:$PATH"
+          "$HOME/bin/fujitsu-control" restart
+          for _ in $(seq 1 30); do
+            if tmux has-session -t hermes-gateway 2>/dev/null && pgrep -f 'hermes.*gateway' >/dev/null 2>&1; then
+              sleep 5
+              if tmux has-session -t hermes-gateway 2>/dev/null && pgrep -f 'hermes.*gateway' >/dev/null 2>&1; then
+                echo HERMES_GATEWAY_ALIVE=1
+                break
+              fi
+            fi
+            sleep 2
+          done
+          tmux has-session -t hermes-gateway
+          pgrep -f 'hermes.*gateway' >/dev/null
+          curl -fsS --max-time 5 http://127.0.0.1:9861/state -o /tmp/fujitsu-control-state.json
+          python3 - <<'PY'
+          import json
+          d=json.load(open('/tmp/fujitsu-control-state.json'))
+          print('control_name=',d.get('name'))
+          print('control_version=',d.get('version'))
+          print('dashboard_healthy=',(d.get('dashboard') or {}).get('healthy'))
+          h=d.get('hermes') or {}
+          print('hermes_installed=',h.get('installed'))
+          print('hermes_runtime_ready=',h.get('runtime_ready'))
+          print('hermes_telegram_configured=',h.get('telegram_configured'))
+          print('hermes_gateway_alive=',h.get('gateway_alive'))
+          if d.get('name')!='FUJITSU-CONTROL': raise SystemExit('wrong control plane')
+          if not (d.get('dashboard') or {}).get('healthy'): raise SystemExit('dashboard unhealthy')
+          if not h.get('installed'): raise SystemExit('Hermes not installed')
+          if not h.get('runtime_ready'): raise SystemExit('Hermes runtime not ready')
+          if not h.get('telegram_configured'): raise SystemExit('Hermes Telegram not configured')
+          if not h.get('gateway_alive'): raise SystemExit('Hermes gateway not alive')
+          PY
+          echo FUJITSU_CONTROL_AND_HERMES_READY=1
