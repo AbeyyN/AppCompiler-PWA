@@ -11,9 +11,15 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: fujitsu-control-bootstrap
+  cancel-in-progress: true
+
 jobs:
   bootstrap:
-    runs-on: [self-hosted, linux, x64, fujitsu, pwa, central]
+    # Bootstrap delivery may use any local Fujitsu worker once. The installed
+    # FUJITSU-CONTROL runtime itself is local-only and is not a GitHub runner.
+    runs-on: [self-hosted, linux, x64, fujitsu]
     timeout-minutes: 35
     steps:
       - name: Checkout control-plane source only
