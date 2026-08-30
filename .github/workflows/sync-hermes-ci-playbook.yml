@@ -1,0 +1,42 @@
+name: Sync Hermes CI Playbook
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/CI_FAILURE_PLAYBOOK.md'
+      - '.github/workflows/sync-hermes-ci-playbook.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    name: Install failure playbook for Hermes 986 CI Doctor
+    runs-on: [self-hosted, linux, x64, fujitsu, pwa, central]
+    timeout-minutes: 5
+    steps:
+      - name: Checkout operations docs
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install playbook into Hermes workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          workspace="$HOME/hermes-workspaces/986-ci-doctor"
+          mkdir -p "$workspace"
+          install -m 644 docs/CI_FAILURE_PLAYBOOK.md "$workspace/CI_FAILURE_PLAYBOOK.md"
+          test -s "$workspace/CI_FAILURE_PLAYBOOK.md"
+          grep -q '^# CI Failure Playbook' "$workspace/CI_FAILURE_PLAYBOOK.md"
+          echo HERMES_CI_PLAYBOOK_READY=1
+
+      - name: Verify Hermes workspace policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s "$HOME/hermes-workspaces/986-ci-doctor/.hermes.md"
+          grep -q 'diagnose GitHub Actions' "$HOME/hermes-workspaces/986-ci-doctor/.hermes.md"
+          echo HERMES_986_WORKSPACE_READY=1
