@@ -11,20 +11,141 @@ permissions:
   contents: read
 
 jobs:
-  inspect:
+  configure:
     runs-on: [self-hosted, linux, x64, fujitsu, pwa, central]
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
-      - name: Inspect OMV create and deploy syntax
+      - name: Configure persistent OMV SMB share for CI artifacts
         shell: bash
         run: |
           set -euo pipefail
           KEY=/home/abeyy/.ssh/fujitsu-build-home
           ssh -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new abeyy@192.168.1.99 'bash -s' <<'REMOTE'
-          set +e
-          echo '--- CREATE HELP ---'; sudo -n omv-confdbadm create --help 2>&1 | head -200
-          echo '--- UPDATE HELP ---'; sudo -n omv-confdbadm update --help 2>&1 | head -200
-          echo '--- DELETE HELP ---'; sudo -n omv-confdbadm delete --help 2>&1 | head -160
-          echo '--- SALT DEPLOY HELP ---'; sudo -n omv-salt deploy --help 2>&1 | head -200
-          echo '--- AVAILABLE SALT STATES ---'; sudo -n omv-salt deploy list 2>&1 | grep -Ei 'samba|shared|filesystem|folder' | head -100
+          set -euo pipefail
+
+          ROOT='/srv/dev-disk-by-uuid-e93f7a21-4a78-4f73-997a-78c11f6c647d/CI-Artifacts'
+          MNTREF='97b97daa-d413-4df6-9b6c-fd2c52464d5a'
+          BACKUP="/etc/openmediavault/config.xml.bak-ci-artifacts-$(date +%Y%m%d-%H%M%S)"
+          sudo -n cp /etc/openmediavault/config.xml "$BACKUP"
+
+          rollback() {
+            rc=$?
+            echo "ERROR: CI-Artifacts SMB setup failed rc=$rc; restoring OMV config"
+            sudo -n cp "$BACKUP" /etc/openmediavault/config.xml || true
+            sudo -n omv-salt deploy run samba >/dev/null 2>&1 || true
+            exit "$rc"
+          }
+          trap rollback ERR
+
+          sudo -n mkdir -p "$ROOT" "$ROOT/Apps/Android" "$ROOT/Apps/iOS" "$ROOT/Apps/PWA" "$ROOT/Packages" "$ROOT/OpenWrt"
+          sudo -n chown abeyy:users "$ROOT" "$ROOT/Apps" "$ROOT/Packages" "$ROOT/OpenWrt"
+          sudo -n chmod 2775 "$ROOT" "$ROOT/Apps" "$ROOT/Packages" "$ROOT/OpenWrt"
+
+          for d in "$ROOT/Apps" "$ROOT/Packages" "$ROOT/OpenWrt"; do
+            sudo -n chgrp -R users "$d"
+            sudo -n chmod -R g+rwX "$d"
+            if command -v setfacl >/dev/null 2>&1; then
+              sudo -n setfacl -R -m u:abeyy:rwx,u:nzrl:rwx,g:users:rwx,m:rwx "$d"
+              sudo -n find "$d" -type d -exec setfacl -m d:u:abeyy:rwx,d:u:nzrl:rwx,d:g:users:rwx,d:m:rwx {} +
+            fi
+          done
+
+          sf_uuid="$(sudo -n omv-confdbadm read --prettify conf.system.sharedfolder | python3 -c 'import json,sys; a=json.load(sys.stdin); print(next((x["uuid"] for x in a if x.get("name")=="CI-Artifacts"),""))')"
+          if [ -z "$sf_uuid" ]; then
+            before="$(mktemp)"; after="$(mktemp)"
+            sudo -n omv-confdbadm read conf.system.sharedfolder > "$before"
+            sudo -n omv-confdbadm create conf.system.sharedfolder >/dev/null
+            sudo -n omv-confdbadm read conf.system.sharedfolder > "$after"
+            sf_uuid="$(python3 - "$before" "$after" <<'PY'
+import json,sys
+b={x['uuid'] for x in json.load(open(sys.argv[1]))}
+a=json.load(open(sys.argv[2]))
+n=[x['uuid'] for x in a if x['uuid'] not in b]
+if len(n)!=1: raise SystemExit(f'expected one new sharedfolder, got {n}')
+print(n[0])
+PY
+)"
+            rm -f "$before" "$after"
+          fi
+
+          python3 - "$sf_uuid" "$MNTREF" <<'PY' | sudo -n omv-confdbadm update conf.system.sharedfolder -
+import json,sys
+uuid,mnt=sys.argv[1:]
+print(json.dumps({
+  'uuid':uuid,
+  'name':'CI-Artifacts',
+  'comment':'AbeyyTechXy CI build artifacts - managed by Fujitsu compiler',
+  'mntentref':mnt,
+  'reldirpath':'CI-Artifacts/',
+  'privileges':{'privilege':[
+    {'type':'user','name':'abeyy','perms':7},
+    {'type':'user','name':'nzrl','perms':7},
+    {'type':'group','name':'users','perms':7}
+  ]}
+}))
+PY
+
+          smb_uuid="$(sudo -n omv-confdbadm read --prettify conf.service.smb.share | python3 -c 'import json,sys,os; a=json.load(sys.stdin); ref=os.environ.get("SFREF",""); print(next((x["uuid"] for x in a if x.get("sharedfolderref")==ref),""))' SFREF="$sf_uuid" 2>/dev/null || true)"
+          if [ -z "$smb_uuid" ]; then
+            before="$(mktemp)"; after="$(mktemp)"
+            sudo -n omv-confdbadm read conf.service.smb.share > "$before"
+            sudo -n omv-confdbadm create conf.service.smb.share >/dev/null
+            sudo -n omv-confdbadm read conf.service.smb.share > "$after"
+            smb_uuid="$(python3 - "$before" "$after" <<'PY'
+import json,sys
+b={x['uuid'] for x in json.load(open(sys.argv[1]))}
+a=json.load(open(sys.argv[2]))
+n=[x['uuid'] for x in a if x['uuid'] not in b]
+if len(n)!=1: raise SystemExit(f'expected one new SMB share, got {n}')
+print(n[0])
+PY
+)"
+            rm -f "$before" "$after"
+          fi
+
+          python3 - "$smb_uuid" "$sf_uuid" <<'PY' | sudo -n omv-confdbadm update conf.service.smb.share -
+import json,sys
+uuid,ref=sys.argv[1:]
+print(json.dumps({
+  'uuid':uuid,
+  'enable':True,
+  'sharedfolderref':ref,
+  'comment':'AbeyyTechXy CI Artifacts',
+  'guest':'no',
+  'readonly':False,
+  'browseable':True,
+  'recyclebin':False,
+  'recyclemaxsize':0,
+  'recyclemaxage':0,
+  'hidedotfiles':True,
+  'inheritacls':False,
+  'inheritpermissions':False,
+  'easupport':True,
+  'storedosattributes':False,
+  'hostsallow':'',
+  'hostsdeny':'',
+  'audit':False,
+  'timemachine':False,
+  'transportencryption':False,
+  'extraoptions':'',
+  'followsymlinks':True,
+  'widelinks':False,
+  'timemachinemaxsize':''
+}))
+PY
+
+          sudo -n omv-salt deploy run samba
+          sudo -n testparm -s >/tmp/ci-artifacts-testparm.txt 2>&1
+          grep -A18 '^\[CI-Artifacts\]' /tmp/ci-artifacts-testparm.txt
+          systemctl is-active --quiet smbd
+          test -d "$ROOT/OpenWrt/AbeyyWRT/latest"
+          echo '--- SHARE READY ---'
+          echo 'UNC=\\192.168.1.99\CI-Artifacts'
+          echo 'UNC_HOSTNAME=\\rapsi-nas\CI-Artifacts'
+          echo 'SHARE=CI-Artifacts'
+          echo "PATH=$ROOT"
+          echo "OMV_SHARED_FOLDER_UUID=$sf_uuid"
+          echo "OMV_SMB_SHARE_UUID=$smb_uuid"
+          echo 'CI_ARTIFACTS_SMB_READY'
+          trap - ERR
           REMOTE
