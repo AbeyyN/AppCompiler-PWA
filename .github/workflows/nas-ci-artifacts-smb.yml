@@ -22,12 +22,10 @@ jobs:
           KEY=/home/abeyy/.ssh/fujitsu-build-home
           ssh -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new abeyy@192.168.1.99 'bash -s' <<'REMOTE'
           set -euo pipefail
-
           ROOT='/srv/dev-disk-by-uuid-e93f7a21-4a78-4f73-997a-78c11f6c647d/CI-Artifacts'
           MNTREF='97b97daa-d413-4df6-9b6c-fd2c52464d5a'
           BACKUP="/etc/openmediavault/config.xml.bak-ci-artifacts-$(date +%Y%m%d-%H%M%S)"
           sudo -n cp /etc/openmediavault/config.xml "$BACKUP"
-
           rollback() {
             rc=$?
             echo "ERROR: CI-Artifacts SMB setup failed rc=$rc; restoring OMV config"
@@ -40,7 +38,6 @@ jobs:
           sudo -n mkdir -p "$ROOT" "$ROOT/Apps/Android" "$ROOT/Apps/iOS" "$ROOT/Apps/PWA" "$ROOT/Packages" "$ROOT/OpenWrt"
           sudo -n chown abeyy:users "$ROOT" "$ROOT/Apps" "$ROOT/Packages" "$ROOT/OpenWrt"
           sudo -n chmod 2775 "$ROOT" "$ROOT/Apps" "$ROOT/Packages" "$ROOT/OpenWrt"
-
           for d in "$ROOT/Apps" "$ROOT/Packages" "$ROOT/OpenWrt"; do
             sudo -n chgrp -R users "$d"
             sudo -n chmod -R g+rwX "$d"
@@ -52,27 +49,17 @@ jobs:
 
           sf_uuid="$(sudo -n omv-confdbadm read conf.system.sharedfolder | jq -r '.[] | select(.name=="CI-Artifacts") | .uuid' | head -1)"
           if [ -z "$sf_uuid" ]; then
-            before="$(mktemp)"; after="$(mktemp)"
-            sudo -n omv-confdbadm read conf.system.sharedfolder > "$before"
-            sudo -n omv-confdbadm create conf.system.sharedfolder >/dev/null
-            sudo -n omv-confdbadm read conf.system.sharedfolder > "$after"
-            sf_uuid="$(python3 -c 'import json,sys; b={x["uuid"] for x in json.load(open(sys.argv[1]))}; a=json.load(open(sys.argv[2])); n=[x["uuid"] for x in a if x["uuid"] not in b]; assert len(n)==1,n; print(n[0])' "$before" "$after")"
-            rm -f "$before" "$after"
+            sf_uuid="$(python3 -c 'import uuid; print(uuid.uuid4())')"
           fi
-
           jq -n --arg uuid "$sf_uuid" --arg mnt "$MNTREF" '{uuid:$uuid,name:"CI-Artifacts",comment:"AbeyyTechXy CI build artifacts - managed by Fujitsu compiler",mntentref:$mnt,reldirpath:"CI-Artifacts/",privileges:{privilege:[{type:"user",name:"abeyy",perms:7},{type:"user",name:"nzrl",perms:7},{type:"group",name:"users",perms:7}]}}' | sudo -n omv-confdbadm update conf.system.sharedfolder -
+          test "$(sudo -n omv-confdbadm read conf.system.sharedfolder | jq -r --arg u "$sf_uuid" '.[] | select(.uuid==$u) | .name')" = 'CI-Artifacts'
 
           smb_uuid="$(sudo -n omv-confdbadm read conf.service.smb.share | jq -r --arg ref "$sf_uuid" '.[] | select(.sharedfolderref==$ref) | .uuid' | head -1)"
           if [ -z "$smb_uuid" ]; then
-            before="$(mktemp)"; after="$(mktemp)"
-            sudo -n omv-confdbadm read conf.service.smb.share > "$before"
-            sudo -n omv-confdbadm create conf.service.smb.share >/dev/null
-            sudo -n omv-confdbadm read conf.service.smb.share > "$after"
-            smb_uuid="$(python3 -c 'import json,sys; b={x["uuid"] for x in json.load(open(sys.argv[1]))}; a=json.load(open(sys.argv[2])); n=[x["uuid"] for x in a if x["uuid"] not in b]; assert len(n)==1,n; print(n[0])' "$before" "$after")"
-            rm -f "$before" "$after"
+            smb_uuid="$(python3 -c 'import uuid; print(uuid.uuid4())')"
           fi
-
           jq -n --arg uuid "$smb_uuid" --arg ref "$sf_uuid" '{uuid:$uuid,enable:true,sharedfolderref:$ref,comment:"AbeyyTechXy CI Artifacts",guest:"no",readonly:false,browseable:true,recyclebin:false,recyclemaxsize:0,recyclemaxage:0,hidedotfiles:true,inheritacls:false,inheritpermissions:false,easupport:true,storedosattributes:false,hostsallow:"",hostsdeny:"",audit:false,timemachine:false,transportencryption:false,extraoptions:"",followsymlinks:true,widelinks:false,timemachinemaxsize:""}' | sudo -n omv-confdbadm update conf.service.smb.share -
+          test "$(sudo -n omv-confdbadm read conf.service.smb.share | jq -r --arg u "$smb_uuid" '.[] | select(.uuid==$u) | .sharedfolderref')" = "$sf_uuid"
 
           sudo -n omv-salt deploy run samba
           sudo -n testparm -s >/tmp/ci-artifacts-testparm.txt 2>&1
