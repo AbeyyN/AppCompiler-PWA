@@ -15,13 +15,20 @@ jobs:
     runs-on: [self-hosted, linux, x64, fujitsu, pwa, central]
     timeout-minutes: 15
     steps:
-      - name: Fix X7 source and shared runtime
+      - name: Fix shared runtime first and persist X7 source with retry
         shell: bash
         run: |
           set -euo pipefail
           GH=(env -u GH_TOKEN -u GITHUB_TOKEN gh)
           meta="$RUNNER_TEMP/meta.json"; src="$RUNNER_TEMP/collector-v2.sh"
-          "${GH[@]}" api repos/AbeyyN/X7-Core-Academy/contents/infra/nas-artifacts/collector-v2.sh?ref=main > "$meta"
+
+          ok=0
+          for attempt in 1 2 3 4 5; do
+            if timeout 45s "${GH[@]}" api repos/AbeyyN/X7-Core-Academy/contents/infra/nas-artifacts/collector-v2.sh?ref=main > "$meta"; then ok=1; break; fi
+            sleep $((attempt*2))
+          done
+          test "$ok" -eq 1
+
           jq -r '.content' "$meta" | tr -d '\n' | base64 -d > "$src"
           sha="$(jq -r '.sha' "$meta")"
           python3 - "$src" <<'PY'
@@ -34,31 +41,63 @@ jobs:
           PY
           bash -n "$src"
           if grep -q 'local cls="\$1" dir=' "$src" || grep -q 'local cls="\$1" base="\$2" dir=' "$src"; then exit 31; fi
-          if ! cmp -s "$src" "$HOME/bin/fujitsu-nas-artifact-store"; then
-            b64="$(base64 -w0 "$src")"
-            jq -n --arg message 'fix: make collector v2 nounset-safe' --arg content "$b64" --arg sha "$sha" '{message:$message,content:$content,sha:$sha,branch:"main"}' > "$RUNNER_TEMP/update.json"
-            "${GH[@]}" api --method PUT repos/AbeyyN/X7-Core-Academy/contents/infra/nas-artifacts/collector-v2.sh --input "$RUNNER_TEMP/update.json" >/dev/null
-          fi
+
+          # Fix live shared runtime before any network write, so current builds are protected.
           install -m 0755 "$src" "$HOME/bin/fujitsu-nas-artifact-store"
           bash -n "$HOME/bin/fujitsu-nas-artifact-store"
-          echo COLLECTOR_FIXED
+          echo LIVE_COLLECTOR_FIXED
 
-      - name: Validate live hook and all runner registrations
+          # Persist the exact fixed collector in the source-of-truth repo with retries.
+          b64="$(base64 -w0 "$src")"
+          jq -n --arg message 'fix: make collector v2 nounset-safe' --arg content "$b64" --arg sha "$sha" '{message:$message,content:$content,sha:$sha,branch:"main"}' > "$RUNNER_TEMP/update.json"
+          persisted=0
+          for attempt in 1 2 3 4 5 6; do
+            if timeout 60s "${GH[@]}" api --method PUT repos/AbeyyN/X7-Core-Academy/contents/infra/nas-artifacts/collector-v2.sh --input "$RUNNER_TEMP/update.json" >/dev/null; then persisted=1; break; fi
+            sleep $((attempt*3))
+          done
+          test "$persisted" -eq 1
+          echo SOURCE_COLLECTOR_FIXED
+
+      - name: Reassert and validate live hook on every runner registration
         shell: bash
         run: |
           set -euo pipefail
-          grep -q 'fujitsu-nas-artifact-store' "$HOME/bin/fujitsu-job-completed.sh"
+          cat > "$HOME/bin/fujitsu-job-completed.sh" <<'HOOK'
+          #!/usr/bin/env bash
+          set -u
+          REPO="${GITHUB_REPOSITORY:-unknown/unknown}"
+          RUN_ID="${GITHUB_RUN_ID:-unknown}"
+          WORKFLOW="${GITHUB_WORKFLOW:-job}"
+          BRANCH="${GITHUB_REF_NAME:-unknown}"
+          safe_repo="${REPO//\//__}"
+          notified="$HOME/.local/state/fujitsu-runner/job-notified/${safe_repo}-${RUN_ID}.done"
+          if [ -x "$HOME/bin/fujitsu-nas-artifact-store" ]; then
+            timeout 900s "$HOME/bin/fujitsu-nas-artifact-store" success "$REPO" "$WORKFLOW" "$BRANCH" "$RUN_ID" || true
+          fi
+          if [ ! -s "$notified" ] && [ -x "$HOME/bin/fujitsu-deliver-build-files" ]; then
+            timeout 660s "$HOME/bin/fujitsu-deliver-build-files" success "$REPO" "$WORKFLOW" "$BRANCH" "$RUN_ID" || true
+          fi
+          exit 0
+          HOOK
+          chmod 0755 "$HOME/bin/fujitsu-job-completed.sh"
+          bash -n "$HOME/bin/fujitsu-job-completed.sh"
+
           count=0; bad=0
           for d in "$HOME"/actions-runner/*; do
             [ -f "$d/.runner" ] || continue
+            envfile="$d/.env"; touch "$envfile"; t="$(mktemp)"
+            grep -v '^ACTIONS_RUNNER_HOOK_JOB_COMPLETED=' "$envfile" > "$t" || true
+            printf 'ACTIONS_RUNNER_HOOK_JOB_COMPLETED=%s\n' "$HOME/bin/fujitsu-job-completed.sh" >> "$t"
+            cat "$t" > "$envfile"; rm -f "$t"
             count=$((count+1))
-            grep -q '^ACTIONS_RUNNER_HOOK_JOB_COMPLETED=.*/fujitsu-job-completed.sh$' "$d/.env" || bad=$((bad+1))
+            grep -q '^ACTIONS_RUNNER_HOOK_JOB_COMPLETED=.*/fujitsu-job-completed.sh$' "$envfile" || bad=$((bad+1))
           done
           echo "RUNNERS=$count BAD=$bad"
           test "$count" -eq 10
           test "$bad" -eq 0
+          grep -q 'fujitsu-nas-artifact-store' "$HOME/bin/fujitsu-job-completed.sh"
 
-      - name: Smoke all routes
+      - name: Smoke Android iOS PWA Packages and OpenWrt routes
         shell: bash
         run: |
           set -euo pipefail
@@ -67,7 +106,7 @@ jobs:
           rm -rf "$app" "$owrt"; mkdir -p "$app/build/web" "$owrt/bin/targets/t/d"
           printf apk > "$app/app-release.apk"; printf aab > "$app/app-release.aab"; printf ipa > "$app/app-release.ipa"
           printf '<title>x</title>' > "$app/build/web/index.html"; printf pkg > "$app/x.txt"; (cd "$app" && zip -q suite-release.zip x.txt)
-          printf fw > "$owrt/bin/targets/t/d/x-sysupgrade.bin"
+          printf fw > "$owrt/bin/targets/t/d/x-sysupgrade.bin"; printf sums > "$owrt/bin/targets/t/d/sha256sums"
           r1="app-${GITHUB_RUN_ID}-$(date +%s)"; r2="owrt-${GITHUB_RUN_ID}-$(date +%s)"
           GITHUB_WORKSPACE="$app" GITHUB_REPOSITORY='AbeyyN/__nas-final-smoke__' GITHUB_RUN_ID="$r1" GITHUB_SHA=x GITHUB_REF_NAME=main GITHUB_REF_TYPE=branch RUNNER_NAME="${RUNNER_NAME:-Fujitsu-PWA-01}" "$HOME/bin/fujitsu-nas-artifact-store" success 'AbeyyN/__nas-final-smoke__' smoke main "$r1"
           GITHUB_WORKSPACE="$owrt" GITHUB_REPOSITORY='AbeyyN/owrt-final-smoke' GITHUB_RUN_ID="$r2" GITHUB_SHA=x GITHUB_REF_NAME=main GITHUB_REF_TYPE=branch RUNNER_NAME="${RUNNER_NAME:-Fujitsu-PWA-01}" "$HOME/bin/fujitsu-nas-artifact-store" success 'AbeyyN/owrt-final-smoke' smoke main "$r2"
@@ -79,6 +118,7 @@ jobs:
           find "$CI_ROOT/Apps/PWA/__nas-final-smoke__/latest" -maxdepth 1 -type f \( -name '*.zip' -o -name '*.tar.gz' \) | grep -q .
           test -f "$CI_ROOT/Packages/__nas-final-smoke__/latest/suite-release.zip"
           test -f "$CI_ROOT/OpenWrt/owrt-final-smoke/latest/x-sysupgrade.bin"
+          test -f "$CI_ROOT/OpenWrt/owrt-final-smoke/latest/sha256sums"
           rm -rf "$CI_ROOT/Apps/Android/__nas-final-smoke__" "$CI_ROOT/Apps/iOS/__nas-final-smoke__" "$CI_ROOT/Apps/PWA/__nas-final-smoke__" "$CI_ROOT/Packages/__nas-final-smoke__" "$CI_ROOT/OpenWrt/owrt-final-smoke"
           echo UNIVERSAL_NAS_WIRING_READY
           REMOTE
