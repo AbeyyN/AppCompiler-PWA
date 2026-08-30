@@ -1,0 +1,134 @@
+name: Harden Global NAS Hook Source
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/harden-global-nas-hook-source.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  harden:
+    runs-on: [self-hosted, linux, x64, fujitsu, pwa, central]
+    timeout-minutes: 15
+    steps:
+      - name: Patch APK delivery installer to preserve NAS-first completion hook
+        shell: bash
+        run: |
+          set -euo pipefail
+          GH=(env -u GH_TOKEN -u GITHUB_TOKEN gh)
+          meta="$RUNNER_TEMP/meta.json"; src="$RUNNER_TEMP/install-global-apk-delivery.yml"
+          for n in 1 2 3 4 5; do
+            timeout 45s "${GH[@]}" api repos/AbeyyN/X7-Core-Academy/contents/.github/workflows/install-global-apk-delivery.yml?ref=main > "$meta" && break
+            sleep $((n*2))
+          done
+          test -s "$meta"
+          jq -r '.content' "$meta" | tr -d '\n' | base64 -d > "$src"
+          sha="$(jq -r '.sha' "$meta")"
+
+          python3 - "$src" <<'PY'
+          from pathlib import Path
+          import re,sys
+          p=Path(sys.argv[1]); s=p.read_text()
+          pat=r'(?ms)^      - name: Install completed hook on every Fujitsu runner\n.*?(?=^      - name: Schedule safe runner reload)'
+          replacement=r'''      - name: Install NAS-first completed hook on every Fujitsu runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x /home/abeyy/bin/fujitsu-nas-artifact-store
+          mkdir -p /home/abeyy/.local/state/fujitsu-runner/job-notified
+          cat > /home/abeyy/bin/fujitsu-job-completed.sh <<'SCRIPT'
+          #!/usr/bin/env bash
+          set -u
+          REPO="${GITHUB_REPOSITORY:-unknown/unknown}"
+          RUN_ID="${GITHUB_RUN_ID:-unknown}"
+          WORKFLOW="${GITHUB_WORKFLOW:-job}"
+          BRANCH="${GITHUB_REF_NAME:-unknown}"
+          safe_repo="${REPO//\//__}"
+          notified_file="$HOME/.local/state/fujitsu-runner/job-notified/${safe_repo}-${RUN_ID}.done"
+
+          if [ -x "$HOME/bin/fujitsu-nas-artifact-store" ]; then
+            timeout 900s "$HOME/bin/fujitsu-nas-artifact-store" success "$REPO" "$WORKFLOW" "$BRANCH" "$RUN_ID" || true
+          fi
+          if [ ! -s "$notified_file" ] && [ -x "$HOME/bin/fujitsu-deliver-build-files" ]; then
+            timeout 660s "$HOME/bin/fujitsu-deliver-build-files" success "$REPO" "$WORKFLOW" "$BRANCH" "$RUN_ID" || true
+          fi
+          exit 0
+          SCRIPT
+          chmod +x /home/abeyy/bin/fujitsu-job-completed.sh
+          bash -n /home/abeyy/bin/fujitsu-job-completed.sh
+
+          count=0
+          for dir in /home/abeyy/actions-runner/*; do
+            [ -d "$dir" ] && [ -f "$dir/.runner" ] || continue
+            envfile="$dir/.env"; touch "$envfile"; tmp="$(mktemp)"
+            grep -v '^ACTIONS_RUNNER_HOOK_JOB_COMPLETED=' "$envfile" > "$tmp" || true
+            printf '%s\n' 'ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/home/abeyy/bin/fujitsu-job-completed.sh' >> "$tmp"
+            cat "$tmp" > "$envfile"; rm -f "$tmp"; count=$((count+1))
+          done
+          echo "Configured NAS-first completed hook on ${count} runner registrations."
+          test "$count" -ge 1
+
+'''
+          ns,n=re.subn(pat,replacement,s,count=1)
+          if n != 1:
+              raise SystemExit(f'expected one hook installer section, replaced {n}')
+          p.write_text(ns)
+          PY
+          grep -q 'Install NAS-first completed hook on every Fujitsu runner' "$src"
+          grep -q 'fujitsu-nas-artifact-store' "$src"
+
+          # Parse YAML if PyYAML is available; otherwise rely on indentation/marker checks.
+          python3 - "$src" <<'PY'
+          import sys
+          try:
+              import yaml
+          except Exception:
+              print('PyYAML unavailable; marker validation used')
+          else:
+              yaml.safe_load(open(sys.argv[1]))
+              print('YAML_PARSE_OK')
+          PY
+
+          b64="$(base64 -w0 "$src")"
+          jq -n --arg message 'fix: preserve NAS-first hook in APK delivery installer' --arg content "$b64" --arg sha "$sha" '{message:$message,content:$content,sha:$sha,branch:"main"}' > "$RUNNER_TEMP/update.json"
+          ok=0
+          for n in 1 2 3 4 5 6; do
+            if timeout 60s "${GH[@]}" api --method PUT repos/AbeyyN/X7-Core-Academy/contents/.github/workflows/install-global-apk-delivery.yml --input "$RUNNER_TEMP/update.json" >/dev/null; then ok=1; break; fi
+            sleep $((n*3))
+          done
+          test "$ok" -eq 1
+          echo APK_INSTALLER_NAS_GUARD_PERSISTED
+
+      - name: Audit X7 infra for hook writers without NAS collector
+        shell: bash
+        run: |
+          set -euo pipefail
+          GH=(env -u GH_TOKEN -u GITHUB_TOKEN gh)
+          repo="$RUNNER_TEMP/x7-audit"
+          rm -rf "$repo"
+          timeout 90s "${GH[@]}" repo clone AbeyyN/X7-Core-Academy "$repo" -- --depth 1 >/dev/null
+          python3 - "$repo" <<'PY'
+          from pathlib import Path
+          import sys
+          root=Path(sys.argv[1]); bad=[]; writers=[]
+          for base in (root/'.github/workflows', root/'infra'):
+              if not base.exists(): continue
+              for p in base.rglob('*'):
+                  if not p.is_file(): continue
+                  try: s=p.read_text(errors='ignore')
+                  except Exception: continue
+                  if 'fujitsu-job-completed.sh' not in s: continue
+                  if 'cat >' in s or 'cat > ' in s:
+                      writers.append(str(p.relative_to(root)))
+                      if 'fujitsu-nas-artifact-store' not in s:
+                          bad.append(str(p.relative_to(root)))
+          print('HOOK_WRITERS=',','.join(writers))
+          print('UNSAFE_WRITERS=',','.join(bad) if bad else 'none')
+          if bad:
+              raise SystemExit('Unsafe completion-hook writers remain: '+', '.join(bad))
+          PY
+          echo GLOBAL_HOOK_SOURCE_AUDIT_OK
