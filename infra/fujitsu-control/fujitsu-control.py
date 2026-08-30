@@ -2,7 +2,6 @@
 import json
 import os
 import shutil
-import signal
 import subprocess
 import threading
 import time
@@ -18,6 +17,7 @@ CONTROL_HOME = HOME / "fujitsu-control"
 STATE_FILE = CONTROL_HOME / "state.json"
 LOG_FILE = CONTROL_HOME / "control.log"
 DASHBOARD_HOME = HOME / "fujitsu-dashboard"
+DASHBOARD_BIN = HOME / "bin" / "fujitsu-dashboard"
 HERMES_HOME = HOME / ".hermes"
 HERMES_WORKSPACE = HOME / "hermes-workspaces" / "986-ci-doctor"
 PATH = f"{HOME}/.local/bin:{HOME}/bin:" + os.environ.get("PATH", "")
@@ -32,9 +32,8 @@ def now_iso():
 
 def log(msg):
     CONTROL_HOME.mkdir(parents=True, exist_ok=True)
-    line = f"[{now_iso()}] {msg}\n"
     with LOG_FILE.open("a", encoding="utf-8") as fh:
-        fh.write(line)
+        fh.write(f"[{now_iso()}] {msg}\n")
 
 
 def run(cmd, timeout=15, cwd=None):
@@ -57,7 +56,7 @@ def tmux_has(name):
 def http_ok(url, expected=None, timeout=3):
     try:
         with urlopen(url, timeout=timeout) as r:
-            body = r.read(512).decode("utf-8", "replace")
+            body = r.read(2048).decode("utf-8", "replace")
             if r.status != 200:
                 return False
             return expected in body if expected else True
@@ -66,35 +65,37 @@ def http_ok(url, expected=None, timeout=3):
 
 
 def dashboard_health():
-    return http_ok("http://127.0.0.1:9860/healthz", "ok", 3)
+    # Current live Command Center v2.1 exposes JSON on /health. Older builds used /healthz.
+    return http_ok("http://127.0.0.1:9860/health", timeout=3) or \
+        http_ok("http://127.0.0.1:9860/healthz", timeout=3)
+
+
+def dashboard_start_command():
+    if DASHBOARD_BIN.exists() and os.access(DASHBOARD_BIN, os.X_OK):
+        return f"exec '{DASHBOARD_BIN}' >> '{HOME}/logs/actions-runner/dashboard.log' 2>&1"
+    py = DASHBOARD_HOME / "dashboard.py"
+    if py.exists():
+        return f"cd '{DASHBOARD_HOME}'; exec python3 dashboard.py >> '{DASHBOARD_HOME}/dashboard.log' 2>&1"
+    old = DASHBOARD_HOME / "dashboard_server.py"
+    if old.exists():
+        return f"cd '{DASHBOARD_HOME}'; exec python3 dashboard_server.py >> '{DASHBOARD_HOME}/dashboard.log' 2>&1"
+    return ""
 
 
 def restart_dashboard():
-    server = DASHBOARD_HOME / "dashboard_server.py"
-    if not server.exists():
-        log("dashboard restart skipped: dashboard_server.py missing")
+    cmd = dashboard_start_command()
+    if not cmd:
+        log("dashboard recovery skipped: no local dashboard launcher/source found")
         return False
-    log("dashboard unhealthy; starting local dashboard service")
+    log("dashboard unhealthy; FUJITSU-CONTROL starting dashboard locally")
     run(["tmux", "kill-session", "-t", "fujitsu-dashboard"], timeout=3)
-    p = run(["pgrep", "-f", "dashboard_server\\.py"], timeout=3)
-    if p and p.returncode == 0:
-        for raw in p.stdout.split():
-            try:
-                pid = int(raw)
-                if pid != os.getpid():
-                    os.kill(pid, signal.SIGTERM)
-            except Exception:
-                pass
     time.sleep(1)
-    cmd = (
-        f"export PATH='{PATH}'; cd '{DASHBOARD_HOME}'; "
-        f"exec python3 dashboard_server.py >> '{DASHBOARD_HOME}/dashboard.log' 2>&1"
-    )
-    p = run(["tmux", "new-session", "-d", "-s", "fujitsu-dashboard", cmd], timeout=5)
+    full = f"export PATH='{PATH}'; {cmd}"
+    p = run(["tmux", "new-session", "-d", "-s", "fujitsu-dashboard", full], timeout=5)
     if not p or p.returncode != 0:
         log("dashboard tmux start failed")
         return False
-    for _ in range(20):
+    for _ in range(30):
         if dashboard_health():
             log("dashboard recovered")
             return True
@@ -117,8 +118,7 @@ def read_env_keys(path):
 
 
 def hermes_command():
-    candidates = [HOME / ".local/bin/hermes", HERMES_HOME / "hermes-agent/venv/bin/hermes"]
-    for p in candidates:
+    for p in (HOME / ".local/bin/hermes", HERMES_HOME / "hermes-agent/venv/bin/hermes"):
         if p.exists() and os.access(p, os.X_OK):
             return str(p)
     return shutil.which("hermes", path=PATH)
@@ -154,11 +154,8 @@ def hermes_snapshot():
     }
     auth_present = (HERMES_HOME / "auth.json").exists()
     provider_ready = bool((provider and model) or (env_keys & provider_keys) or auth_present)
-    gateway_alive = tmux_has("hermes-gateway") or bool(
-        (lambda p: p and p.returncode == 0 and p.stdout.strip())(
-            run(["pgrep", "-f", "hermes.*gateway"], timeout=3)
-        )
-    )
+    p = run(["pgrep", "-f", "hermes.*gateway"], timeout=3)
+    gateway_alive = tmux_has("hermes-gateway") or bool(p and p.returncode == 0 and p.stdout.strip())
     return {
         "installed": bool(h and version),
         "version": version or "not installed",
@@ -182,10 +179,8 @@ def start_hermes_gateway(snapshot):
         return False
     logs = HERMES_HOME / "logs"
     logs.mkdir(parents=True, exist_ok=True)
-    cmd = (
-        f"export PATH='{PATH}'; cd '{HERMES_WORKSPACE}'; "
-        f"exec '{h}' gateway run >> '{logs}/gateway.log' 2>&1"
-    )
+    cmd = (f"export PATH='{PATH}'; cd '{HERMES_WORKSPACE}'; "
+           f"exec '{h}' gateway run >> '{logs}/gateway.log' 2>&1")
     p = run(["tmux", "new-session", "-d", "-s", "hermes-gateway", cmd], timeout=5)
     if p and p.returncode == 0:
         log("Hermes Telegram gateway started under FUJITSU-CONTROL")
@@ -205,7 +200,7 @@ def update_state():
         hermes = hermes_snapshot()
     state = {
         "name": "FUJITSU-CONTROL",
-        "version": "1.0.0",
+        "version": "1.1.0",
         "updated": now_iso(),
         "pid": os.getpid(),
         "dashboard": {"healthy": dash, "port": 9860, "tmux": tmux_has("fujitsu-dashboard")},
@@ -213,16 +208,14 @@ def update_state():
         "control": {"healthy": True, "port": PORT, "tmux": tmux_has("fujitsu-control")},
     }
     with STATE_LOCK:
-        STATE.clear()
-        STATE.update(state)
+        STATE.clear(); STATE.update(state)
     tmp = STATE_FILE.with_suffix(".tmp")
     tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
     tmp.replace(STATE_FILE)
 
 
 def monitor_loop():
-    last_dash = None
-    last_gateway = None
+    last_dash = last_gateway = None
     while not STOP.is_set():
         try:
             update_state()
@@ -230,40 +223,27 @@ def monitor_loop():
                 dash = STATE.get("dashboard", {}).get("healthy")
                 gateway = STATE.get("hermes", {}).get("gateway_alive")
             if dash != last_dash:
-                log(f"dashboard healthy={dash}")
-                last_dash = dash
+                log(f"dashboard healthy={dash}"); last_dash = dash
             if gateway != last_gateway:
-                log(f"Hermes gateway alive={gateway}")
-                last_gateway = gateway
+                log(f"Hermes gateway alive={gateway}"); last_gateway = gateway
         except Exception as e:
             log(f"monitor error: {type(e).__name__}: {e}")
         STOP.wait(10)
 
 
 class Handler(BaseHTTPRequestHandler):
-    def log_message(self, *_):
-        return
-
+    def log_message(self, *_): return
     def send_json(self, obj, status=200):
         data = json.dumps(obj).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
-
+        self.send_response(status); self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data)
     def do_GET(self):
         if self.path in ("/health", "/healthz"):
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain")
-            self.end_headers()
-            self.wfile.write(b"ok\n")
-            return
+            self.send_response(200); self.send_header("Content-Type", "text/plain")
+            self.end_headers(); self.wfile.write(b"ok\n"); return
         if self.path in ("/", "/state", "/api/state"):
-            with STATE_LOCK:
-                data = json.loads(json.dumps(STATE))
-            self.send_json(data)
-            return
+            with STATE_LOCK: data = json.loads(json.dumps(STATE))
+            self.send_json(data); return
         self.send_json({"error": "not found"}, 404)
 
 
@@ -271,14 +251,11 @@ def main():
     CONTROL_HOME.mkdir(parents=True, exist_ok=True)
     log("FUJITSU-CONTROL starting; local control-plane is not a GitHub runner")
     update_state()
-    t = threading.Thread(target=monitor_loop, daemon=True)
-    t.start()
+    threading.Thread(target=monitor_loop, daemon=True).start()
     server = ThreadingHTTPServer((HOST, PORT), Handler)
-    try:
-        server.serve_forever()
+    try: server.serve_forever()
     finally:
-        STOP.set()
-        server.server_close()
+        STOP.set(); server.server_close()
 
 
 if __name__ == "__main__":
