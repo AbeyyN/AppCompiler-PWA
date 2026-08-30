@@ -1,0 +1,100 @@
+name: Harden Global NAS Multi Job Collection
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/harden-global-nas-multijob.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  harden:
+    runs-on: [self-hosted, linux, x64, fujitsu, pwa, central]
+    timeout-minutes: 15
+    steps:
+      - name: Make collector state job-aware and persist source
+        shell: bash
+        run: |
+          set -euo pipefail
+          GH=(env -u GH_TOKEN -u GITHUB_TOKEN gh)
+          meta="$RUNNER_TEMP/meta.json"; src="$RUNNER_TEMP/collector-v2.sh"
+          ok=0
+          for n in 1 2 3 4 5; do
+            if timeout 45s "${GH[@]}" api repos/AbeyyN/X7-Core-Academy/contents/infra/nas-artifacts/collector-v2.sh?ref=main > "$meta"; then ok=1; break; fi
+            sleep $((n*2))
+          done
+          test "$ok" -eq 1
+          jq -r '.content' "$meta" | tr -d '\n' | base64 -d > "$src"
+          sha="$(jq -r '.sha' "$meta")"
+
+          python3 - "$src" <<'PY'
+          from pathlib import Path
+          import sys
+          p=Path(sys.argv[1]); s=p.read_text()
+          if 'JOB="${GITHUB_JOB:-job}"' not in s:
+              s=s.replace('RUNNER="${RUNNER_NAME:-Fujitsu-Ubuntu}"\n', 'RUNNER="${RUNNER_NAME:-Fujitsu-Ubuntu}"\nJOB="${GITHUB_JOB:-job}"\n')
+          if 'safe_job="${JOB//[^A-Za-z0-9_.-]/_}"' not in s:
+              s=s.replace('safe_runner="${RUNNER//[^A-Za-z0-9_.-]/_}"\n', 'safe_runner="${RUNNER//[^A-Za-z0-9_.-]/_}"\nsafe_job="${JOB//[^A-Za-z0-9_.-]/_}"\n')
+          s=s.replace('state="$STATE_DIR/${REPO//\\//__}-${RUN_ID}-${safe_runner}.done"', 'state="$STATE_DIR/${REPO//\\//__}-${RUN_ID}-${safe_runner}-${safe_job}.done"')
+          if '"job":"$JOB",' not in s:
+              s=s.replace('  "runner":"$RUNNER",\n', '  "runner":"$RUNNER",\n  "job":"$JOB",\n')
+          p.write_text(s)
+          PY
+          bash -n "$src"
+          grep -Fq 'JOB="${GITHUB_JOB:-job}"' "$src"
+          grep -Fq '${safe_runner}-${safe_job}.done' "$src"
+          grep -Fq '"job":"$JOB"' "$src"
+
+          # Protect current runner immediately.
+          install -m 0755 "$src" "$HOME/bin/fujitsu-nas-artifact-store"
+          bash -n "$HOME/bin/fujitsu-nas-artifact-store"
+
+          # Persist source of truth with retry.
+          b64="$(base64 -w0 "$src")"
+          jq -n --arg message 'fix: make NAS collector multi-job aware' --arg content "$b64" --arg sha "$sha" '{message:$message,content:$content,sha:$sha,branch:"main"}' > "$RUNNER_TEMP/update.json"
+          persisted=0
+          for n in 1 2 3 4 5 6; do
+            if timeout 60s "${GH[@]}" api --method PUT repos/AbeyyN/X7-Core-Academy/contents/infra/nas-artifacts/collector-v2.sh --input "$RUNNER_TEMP/update.json" >/dev/null; then persisted=1; break; fi
+            sleep $((n*3))
+          done
+          test "$persisted" -eq 1
+          echo MULTIJOB_COLLECTOR_PERSISTED
+
+      - name: Verify all ten runner hooks still use shared collector
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'fujitsu-nas-artifact-store' "$HOME/bin/fujitsu-job-completed.sh"
+          count=0; bad=0
+          for d in "$HOME"/actions-runner/*; do
+            [ -f "$d/.runner" ] || continue
+            count=$((count+1))
+            grep -q '^ACTIONS_RUNNER_HOOK_JOB_COMPLETED=.*/fujitsu-job-completed.sh$' "$d/.env" || bad=$((bad+1))
+          done
+          echo "RUNNERS=$count BAD=$bad"
+          test "$count" -eq 10
+          test "$bad" -eq 0
+
+      - name: Prove two jobs in one workflow run are both collected
+        shell: bash
+        run: |
+          set -euo pipefail
+          source "$HOME/.config/fujitsu-runner/nas-artifacts.env"
+          a="$RUNNER_TEMP/multi-a"; b="$RUNNER_TEMP/multi-b"
+          rm -rf "$a" "$b"; mkdir -p "$a" "$b/build/web"
+          printf first > "$a/first-release.apk"
+          printf '<title>second</title>' > "$b/build/web/index.html"
+          run="multijob-${GITHUB_RUN_ID}-$(date +%s)"
+          repo='AbeyyN/__nas-multijob-smoke__'
+          GITHUB_WORKSPACE="$a" GITHUB_REPOSITORY="$repo" GITHUB_RUN_ID="$run" GITHUB_JOB='android' GITHUB_SHA=a GITHUB_REF_NAME=main GITHUB_REF_TYPE=branch RUNNER_NAME="${RUNNER_NAME:-Fujitsu-PWA-01}" "$HOME/bin/fujitsu-nas-artifact-store" success "$repo" smoke main "$run"
+          GITHUB_WORKSPACE="$b" GITHUB_REPOSITORY="$repo" GITHUB_RUN_ID="$run" GITHUB_JOB='pwa' GITHUB_SHA=b GITHUB_REF_NAME=main GITHUB_REF_TYPE=branch RUNNER_NAME="${RUNNER_NAME:-Fujitsu-PWA-01}" "$HOME/bin/fujitsu-nas-artifact-store" success "$repo" smoke main "$run"
+          "$HOME/bin/fujitsu-nas-ssh" -o BatchMode=yes "$PI_USER@$PI_HOST" "CI_ROOT='$CI_ROOT' bash -s" <<'REMOTE'
+          set -euo pipefail
+          test -f "$CI_ROOT/Apps/Android/__nas-multijob-smoke__/latest/__nas-multijob-smoke__-latest.apk"
+          find "$CI_ROOT/Apps/PWA/__nas-multijob-smoke__/latest" -maxdepth 1 -type f \( -name '*.zip' -o -name '*.tar.gz' \) | grep -q .
+          rm -rf "$CI_ROOT/Apps/Android/__nas-multijob-smoke__" "$CI_ROOT/Apps/PWA/__nas-multijob-smoke__"
+          echo MULTIJOB_NAS_COLLECTION_OK
+          REMOTE
