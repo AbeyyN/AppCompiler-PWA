@@ -15,18 +15,16 @@ jobs:
     runs-on: [self-hosted, linux, x64, fujitsu, pwa, central]
     timeout-minutes: 10
     steps:
-      - name: Inspect OMV schema for CI artifacts share
+      - name: Inspect OMV create and deploy syntax
         shell: bash
         run: |
           set -euo pipefail
           KEY=/home/abeyy/.ssh/fujitsu-build-home
           ssh -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new abeyy@192.168.1.99 'bash -s' <<'REMOTE'
           set +e
-          root='/srv/dev-disk-by-uuid-e93f7a21-4a78-4f73-997a-78c11f6c647d/CI-Artifacts'
-          echo '--- CI ROOT ---'; ls -ld "$root"; find "$root" -maxdepth 3 -mindepth 1 -type d -printf '%M %u:%g %p\n' | head -100
-          echo '--- OMV CONFDB HELP ---'; sudo -n omv-confdbadm --help 2>&1 | head -160
-          echo '--- OMV SHARED FOLDERS CORRECT READ ---'; sudo -n omv-confdbadm read --prettify conf.system.sharedfolder 2>&1 | head -500
-          echo '--- OMV SMB SHARES CORRECT READ ---'; sudo -n omv-confdbadm read --prettify conf.service.smb.share 2>&1 | head -500
-          echo '--- CONFIG XML SHARED FOLDER/SMB REGION ---'; sudo -n sed -n '400,620p' /etc/openmediavault/config.xml
-          echo '--- OMV SALT HELP ---'; sudo -n omv-salt --help 2>&1 | head -160
+          echo '--- CREATE HELP ---'; sudo -n omv-confdbadm create --help 2>&1 | head -200
+          echo '--- UPDATE HELP ---'; sudo -n omv-confdbadm update --help 2>&1 | head -200
+          echo '--- DELETE HELP ---'; sudo -n omv-confdbadm delete --help 2>&1 | head -160
+          echo '--- SALT DEPLOY HELP ---'; sudo -n omv-salt deploy --help 2>&1 | head -200
+          echo '--- AVAILABLE SALT STATES ---'; sudo -n omv-salt deploy list 2>&1 | grep -Ei 'samba|shared|filesystem|folder' | head -100
           REMOTE
