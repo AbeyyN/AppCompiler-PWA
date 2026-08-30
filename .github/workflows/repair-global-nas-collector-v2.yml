@@ -1,0 +1,84 @@
+name: Repair Global NAS Collector v2
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/repair-global-nas-collector-v2.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  repair:
+    runs-on: [self-hosted, linux, x64, fujitsu, pwa, central]
+    timeout-minutes: 15
+    steps:
+      - name: Fix X7 source and shared runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          GH=(env -u GH_TOKEN -u GITHUB_TOKEN gh)
+          meta="$RUNNER_TEMP/meta.json"; src="$RUNNER_TEMP/collector-v2.sh"
+          "${GH[@]}" api repos/AbeyyN/X7-Core-Academy/contents/infra/nas-artifacts/collector-v2.sh?ref=main > "$meta"
+          jq -r '.content' "$meta" | tr -d '\n' | base64 -d > "$src"
+          sha="$(jq -r '.sha' "$meta")"
+          python3 - "$src" <<'PY'
+          from pathlib import Path
+          import sys
+          p=Path(sys.argv[1]); s=p.read_text()
+          s=s.replace('  local cls="$1" dir="$tmp/$cls"\n', '  local cls="$1"\n  local dir="$tmp/$cls"\n')
+          s=s.replace('  local cls="$1" base="$2" dir="$tmp/$cls"\n', '  local cls="$1" base="$2"\n  local dir="$tmp/$cls"\n')
+          p.write_text(s)
+          PY
+          bash -n "$src"
+          if grep -q 'local cls="\$1" dir=' "$src" || grep -q 'local cls="\$1" base="\$2" dir=' "$src"; then exit 31; fi
+          if ! cmp -s "$src" "$HOME/bin/fujitsu-nas-artifact-store"; then
+            b64="$(base64 -w0 "$src")"
+            jq -n --arg message 'fix: make collector v2 nounset-safe' --arg content "$b64" --arg sha "$sha" '{message:$message,content:$content,sha:$sha,branch:"main"}' > "$RUNNER_TEMP/update.json"
+            "${GH[@]}" api --method PUT repos/AbeyyN/X7-Core-Academy/contents/infra/nas-artifacts/collector-v2.sh --input "$RUNNER_TEMP/update.json" >/dev/null
+          fi
+          install -m 0755 "$src" "$HOME/bin/fujitsu-nas-artifact-store"
+          bash -n "$HOME/bin/fujitsu-nas-artifact-store"
+          echo COLLECTOR_FIXED
+
+      - name: Validate live hook and all runner registrations
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'fujitsu-nas-artifact-store' "$HOME/bin/fujitsu-job-completed.sh"
+          count=0; bad=0
+          for d in "$HOME"/actions-runner/*; do
+            [ -f "$d/.runner" ] || continue
+            count=$((count+1))
+            grep -q '^ACTIONS_RUNNER_HOOK_JOB_COMPLETED=.*/fujitsu-job-completed.sh$' "$d/.env" || bad=$((bad+1))
+          done
+          echo "RUNNERS=$count BAD=$bad"
+          test "$count" -eq 10
+          test "$bad" -eq 0
+
+      - name: Smoke all routes
+        shell: bash
+        run: |
+          set -euo pipefail
+          source "$HOME/.config/fujitsu-runner/nas-artifacts.env"
+          app="$RUNNER_TEMP/app-smoke"; owrt="$RUNNER_TEMP/owrt-smoke"
+          rm -rf "$app" "$owrt"; mkdir -p "$app/build/web" "$owrt/bin/targets/t/d"
+          printf apk > "$app/app-release.apk"; printf aab > "$app/app-release.aab"; printf ipa > "$app/app-release.ipa"
+          printf '<title>x</title>' > "$app/build/web/index.html"; printf pkg > "$app/x.txt"; (cd "$app" && zip -q suite-release.zip x.txt)
+          printf fw > "$owrt/bin/targets/t/d/x-sysupgrade.bin"
+          r1="app-${GITHUB_RUN_ID}-$(date +%s)"; r2="owrt-${GITHUB_RUN_ID}-$(date +%s)"
+          GITHUB_WORKSPACE="$app" GITHUB_REPOSITORY='AbeyyN/__nas-final-smoke__' GITHUB_RUN_ID="$r1" GITHUB_SHA=x GITHUB_REF_NAME=main GITHUB_REF_TYPE=branch RUNNER_NAME="${RUNNER_NAME:-Fujitsu-PWA-01}" "$HOME/bin/fujitsu-nas-artifact-store" success 'AbeyyN/__nas-final-smoke__' smoke main "$r1"
+          GITHUB_WORKSPACE="$owrt" GITHUB_REPOSITORY='AbeyyN/owrt-final-smoke' GITHUB_RUN_ID="$r2" GITHUB_SHA=x GITHUB_REF_NAME=main GITHUB_REF_TYPE=branch RUNNER_NAME="${RUNNER_NAME:-Fujitsu-PWA-01}" "$HOME/bin/fujitsu-nas-artifact-store" success 'AbeyyN/owrt-final-smoke' smoke main "$r2"
+          "$HOME/bin/fujitsu-nas-ssh" -o BatchMode=yes "$PI_USER@$PI_HOST" "CI_ROOT='$CI_ROOT' bash -s" <<'REMOTE'
+          set -euo pipefail
+          test -f "$CI_ROOT/Apps/Android/__nas-final-smoke__/latest/__nas-final-smoke__-latest.apk"
+          test -f "$CI_ROOT/Apps/Android/__nas-final-smoke__/latest/__nas-final-smoke__-latest.aab"
+          test -f "$CI_ROOT/Apps/iOS/__nas-final-smoke__/latest/__nas-final-smoke__-latest.ipa"
+          find "$CI_ROOT/Apps/PWA/__nas-final-smoke__/latest" -maxdepth 1 -type f \( -name '*.zip' -o -name '*.tar.gz' \) | grep -q .
+          test -f "$CI_ROOT/Packages/__nas-final-smoke__/latest/suite-release.zip"
+          test -f "$CI_ROOT/OpenWrt/owrt-final-smoke/latest/x-sysupgrade.bin"
+          rm -rf "$CI_ROOT/Apps/Android/__nas-final-smoke__" "$CI_ROOT/Apps/iOS/__nas-final-smoke__" "$CI_ROOT/Apps/PWA/__nas-final-smoke__" "$CI_ROOT/Packages/__nas-final-smoke__" "$CI_ROOT/OpenWrt/owrt-final-smoke"
+          echo UNIVERSAL_NAS_WIRING_READY
+          REMOTE
