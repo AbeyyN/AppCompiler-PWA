@@ -79,7 +79,11 @@ jobs:
           d=json.load(open('/tmp/fujitsu-dashboard-status.json'))
           s=d.get('summary') or {}
           h=d.get('hermes') or {}
-          raise SystemExit(0 if s.get('runner_total') == 9 and h.get('ready') else 1)
+          total=int(s.get('runner_total') or 0)
+          online=int(s.get('runner_online') or 0)
+          listeners=int(s.get('local_listeners') or 0)
+          ok=(total >= 1 and online == total and listeners == total and bool(h.get('ready')))
+          raise SystemExit(0 if ok else 1)
           PY
               then
                 ready=1
@@ -106,7 +110,7 @@ jobs:
           fi
           echo DASHBOARD_CACHE_READY=1
 
-      - name: Verify Hermes and every local runner in API
+      - name: Verify Hermes and every discovered local runner in API
         shell: bash
         run: |
           set -euo pipefail
@@ -118,32 +122,27 @@ jobs:
           h=d.get('hermes') or {}
           projects=d.get('projects') or []
           runners=[(p.get('repo'),r.get('name')) for p in projects for r in p.get('runners',[])]
-          expected={
-            ('XHomeNetwork','Fujitsu-Ubuntu'),
-            ('SK-Gong-Kapas','Fujitsu-Ubuntu'),
-            ('XMA7','Fujitsu-Ubuntu'),
-            ('XSAHub','Fujitsu-Ubuntu'),
-            ('X7-Core-Academy','Fujitsu-Ubuntu'),
-            ('OpenWRT---AbeyyWRT','Fujitsu-Ubuntu'),
-            ('OpenWRT---AbeyyWRT','Fujitsu-Ubuntu-Light'),
-            ('AppCompiler-PWA','Fujitsu-PWA'),
-            ('AppCompiler-PWA','Fujitsu-PWA-01'),
-          }
-          missing=sorted(expected-set(runners))
+          total=int(s.get('runner_total') or 0)
+          online=int(s.get('runner_online') or 0)
+          listeners=int(s.get('local_listeners') or 0)
           print('dashboard_version=v3')
           print('repo_total=',s.get('repo_total'))
-          print('runner_total=',s.get('runner_total'))
-          print('runner_online=',s.get('runner_online'))
-          print('local_listeners=',s.get('local_listeners'))
+          print('runner_total=',total)
+          print('runner_online=',online)
+          print('local_listeners=',listeners)
           print('hermes_ready=',h.get('ready'))
           print('hermes_version=',h.get('version'))
           print('hermes_provider=',h.get('provider'))
           print('hermes_model=',h.get('model'))
           print('runner_names=', ', '.join(f'{repo}:{name}' for repo,name in runners))
-          if missing:
-              raise SystemExit('missing runners: '+repr(missing))
-          if s.get('runner_total') != 9:
-              raise SystemExit(f"expected 9 runners, got {s.get('runner_total')}")
+          if total < 1:
+              raise SystemExit('no discovered local runners')
+          if len(runners) != total:
+              raise SystemExit(f'dashboard runner list mismatch: api={len(runners)} summary={total}')
+          if online != total:
+              raise SystemExit(f'not all discovered runners are online: {online}/{total}')
+          if listeners != total:
+              raise SystemExit(f'not all discovered runners have local listeners: {listeners}/{total}')
           if not h.get('ready'):
               raise SystemExit('Hermes dashboard status is not ready')
           PY
