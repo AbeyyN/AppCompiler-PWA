@@ -42,7 +42,7 @@ jobs:
           PY
           bash -n "$src"
           ! grep -Fq 'in *debug*|*profile*) continue' "$src"
-          grep -Fq "-iname '*.apk'" "$src"
+          grep -Fq -- "-iname '*.apk'" "$src"
 
           install -m 0755 "$src" "$HOME/bin/fujitsu-nas-artifact-store"
           bash -n "$HOME/bin/fujitsu-nas-artifact-store"
