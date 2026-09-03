@@ -1,0 +1,37 @@
+name: Redmi Rescue Diagnostic
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/redmi-rescue-diagnostic.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 8
+    steps:
+      - name: Inspect post-job rescue
+        shell: bash
+        run: |
+          set +e
+          export HOME=/home/abeyy
+          export PATH="$HOME/.local/bin:$HOME/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+          echo "MACHINE=$(hostname) RUNNER=${RUNNER_NAME:-unknown} DATE=$(date -Is)"
+          echo '=== RESCUE LOG ==='
+          tail -250 "$HOME/redmi-postjob-rescue.log" 2>/dev/null || true
+          echo '=== MANAGER LOG ==='
+          tail -120 "$HOME/redmi-runner-manager.log" 2>/dev/null || true
+          echo '=== PROCESSES ==='
+          pgrep -af 'Runner.Listener run|redmi-runner-manager|redmi-postjob-rescue|telemetry.py' || true
+          echo '=== TELEMETRY ==='
+          curl -fsS http://127.0.0.1:9862/health; echo
+          curl -fsS http://127.0.0.1:9862/api/status | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("version"),d.get("summary"),d.get("system"),"projects",len(d.get("projects",[])),"history",len(d.get("history",[])))' || true
+          echo '=== RASPI ==='
+          curl -fsS http://192.168.1.99:9860/health; echo
+          echo '=== LOCAL NAMES ==='
+          for d in "$HOME/actions-runner"/*; do [ -f "$d/.runner" ] || continue; printf '%s\t' "$(basename "$d")"; jq -r '.agentName' "$d/.runner"; done
