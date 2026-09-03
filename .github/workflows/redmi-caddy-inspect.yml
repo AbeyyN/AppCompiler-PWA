@@ -1,0 +1,33 @@
+name: Redmi Caddy Inspect
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/redmi-caddy-inspect.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: [self-hosted, linux, x64, redmi]
+    timeout-minutes: 8
+    steps:
+      - name: Inspect Raspi Caddy routing
+        shell: bash
+        run: |
+          set -euo pipefail
+          export HOME=/home/abeyy
+          KEY="$HOME/.ssh/redmi-build-home"
+          test -r "$KEY"
+          ssh -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new abeyy@192.168.1.99 '
+            set +e
+            echo "=== HOST ==="; hostname; date -Is
+            echo "=== CADDYFILE ==="; sudo -n cat /etc/caddy/Caddyfile
+            echo "=== CADDY VALIDATE ==="; sudo -n caddy validate --config /etc/caddy/Caddyfile 2>&1
+            echo "=== CADDY ADAPT ==="; sudo -n caddy adapt --config /etc/caddy/Caddyfile --pretty 2>&1 | head -260
+            echo "=== LISTENERS ==="; sudo -n ss -lntp | grep -E ":(80|9860|9865)\\b" || true
+            echo "=== SERVICE ==="; systemctl status caddy --no-pager -l | head -70
+          '
