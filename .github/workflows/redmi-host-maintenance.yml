@@ -13,125 +13,12 @@ permissions:
 jobs:
   host:
     runs-on: [self-hosted, linux, x64]
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
-      - name: Finalize Raspi dashboard ownership
+      - name: Diagnose Raspi Caddy failure
         shell: bash
         run: |
           set -euo pipefail
-          export PATH="$HOME/.local/bin:$HOME/bin:$PATH"
-          test "$(hostname)" = redmi-build
           KEY="$HOME/.ssh/fujitsu-build-home"; test -r "$KEY"
           SSH=(ssh -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new abeyy@192.168.1.99)
-
-          echo '=== 1. PROVE PRECONDITIONS ==='
-          curl -fsS http://127.0.0.1:9862/health; echo
-          "${SSH[@]}" 'curl -fsS http://127.0.0.1:19861/health; echo; sudo -n systemctl is-active redmi-dashboard.service'
-
-          echo '=== 2. FIX CADDY WITH VALID MULTILINE HANDLERS ==='
-          "${SSH[@]}" 'python3 -' <<'PY'
-          from pathlib import Path
-          import re
-          src=Path('/etc/caddy/Caddyfile').read_text()
-          home='''# BUILD-HOME-BEGIN
-          http://build.home {
-              bind 192.168.1.99
-              handle /api/* {
-                  reverse_proxy 192.168.1.96:9862
-              }
-              handle /health {
-                  reverse_proxy 127.0.0.1:19861
-              }
-              handle {
-                  reverse_proxy 127.0.0.1:19861
-              }
-          }
-          # BUILD-HOME-END'''
-          lan='''# BUILD-LAN-BEGIN
-          http://192.168.1.99:9860 {
-              handle /api/* {
-                  reverse_proxy 192.168.1.96:9862
-              }
-              handle /health {
-                  reverse_proxy 127.0.0.1:19861
-              }
-              handle {
-                  reverse_proxy 127.0.0.1:19861
-              }
-          }
-          # BUILD-LAN-END'''
-          src,n1=re.subn(r'# BUILD-HOME-BEGIN.*?# BUILD-HOME-END',home,src,flags=re.S)
-          src,n2=re.subn(r'# BUILD-LAN-BEGIN.*?# BUILD-LAN-END',lan,src,flags=re.S)
-          if (n1,n2)!=(1,1): raise SystemExit(f'markers home={n1} lan={n2}')
-          Path('/tmp/Caddyfile.redmi.valid').write_text(src)
-          PY
-          "${SSH[@]}" 'sudo -n caddy validate --config /tmp/Caddyfile.redmi.valid; sudo -n install -m 644 /tmp/Caddyfile.redmi.valid /etc/caddy/Caddyfile; sudo -n systemctl restart caddy; sleep 2; sudo -n systemctl is-active caddy; curl -fsS http://192.168.1.99:9860/health; echo; curl -fsS http://192.168.1.99:9860/api/state | python3 -c "import json,sys;d=json.load(sys.stdin);print(d[\"source\"],d[\"dashboard_owner\"],sum(x[\"online\"] for x in d[\"runners\"]),len(d[\"runners\"]))"; curl -fsS -H "Host: build.home" http://192.168.1.99/ | grep -q "986 Redmi Build Command Center"'
-
-          echo '=== 3. INSTALL HEADLESS REDMI-CONTROL ==='
-          mkdir -p "$HOME/redmi-control"
-          cat > "$HOME/redmi-control/control.py" <<'PY'
-          #!/usr/bin/env python3
-          import json,urllib.request
-          from datetime import datetime
-          from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
-          def get(url):
-              try:
-                  with urllib.request.urlopen(url,timeout=3) as r:return json.loads(r.read().decode())
-              except Exception:return {}
-          def state():
-              t=get('http://127.0.0.1:9862/health'); d=get('http://192.168.1.99:9860/health')
-              return {'name':'REDMI-CONTROL','version':'2.0.0','updated':datetime.now().astimezone().isoformat(timespec='seconds'),'host':'redmi-build','telemetry':{'healthy':bool(t.get('ok')),'port':9862},'dashboard':{'healthy':bool(d.get('ok')),'owner':'rapsi-nas','url':'http://192.168.1.99:9860'},'control':{'healthy':True,'port':9861}}
-          class H(BaseHTTPRequestHandler):
-              def log_message(self,*a):pass
-              def sendj(self,o):
-                  b=json.dumps(o,separators=(',',':')).encode();self.send_response(200);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(b)));self.end_headers();self.wfile.write(b)
-              def do_GET(self):
-                  p=self.path.split('?',1)[0]
-                  if p in ('/state','/api/state'):return self.sendj(state())
-                  if p in ('/health','/healthz'):return self.sendj({'ok':True,'name':'REDMI-CONTROL','version':'2.0.0'})
-                  self.send_response(404);self.end_headers()
-          ThreadingHTTPServer(('127.0.0.1',9861),H).serve_forever()
-          PY
-          cat > "$HOME/bin/redmi-control" <<'EOF'
-          #!/usr/bin/env bash
-          set -euo pipefail
-          case "${1:-status}" in
-            start) tmux has-session -t redmi-control 2>/dev/null || env -u RUNNER_TRACKING_ID tmux new-session -d -s redmi-control "cd '$HOME/redmi-control'; exec python3 control.py >> '$HOME/redmi-control/control.log' 2>&1" ;;
-            stop) tmux kill-session -t redmi-control 2>/dev/null || true ;;
-            restart) "$0" stop; sleep 1; "$0" start ;;
-            status) curl -fsS --max-time 5 http://127.0.0.1:9861/state ;;
-          esac
-          EOF
-          chmod 755 "$HOME/redmi-control/control.py" "$HOME/bin/redmi-control"
-          tmux kill-session -t fujitsu-control 2>/dev/null || true
-          pkill -TERM -f '/home/abeyy/fujitsu-control/[f]ujitsu-control.py' 2>/dev/null || true
-          "$HOME/bin/redmi-control" restart
-          sleep 2
-          curl -fsS http://127.0.0.1:9861/state | grep -q 'REDMI-CONTROL'
-          ln -sfn "$HOME/bin/redmi-control" "$HOME/bin/fujitsu-control"
-
-          echo '=== 4. REMOVE DASHBOARD + REVERSE TUNNEL FROM REDMI ==='
-          tmux kill-session -t fujitsu-dashboard 2>/dev/null || true
-          tmux kill-session -t fujitsu-build-home-tunnel 2>/dev/null || true
-          pkill -TERM -f '/home/abeyy/fujitsu-dashboard/[d]ashboard.py' 2>/dev/null || true
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-          p=Path.home()/'bin/start-all-github-runners.sh'; s=p.read_text()
-          s=re.sub(r'\n?# BUILD-HOME-TUNNEL-BEGIN.*?# BUILD-HOME-TUNNEL-END\n?','\n',s,flags=re.S)
-          s=re.sub(r'\n?# BEGIN FUJITSU DASHBOARD.*?# END FUJITSU DASHBOARD\n?','\n',s,flags=re.S)
-          s=re.sub(r'# BEGIN FUJITSU CONTROL.*?# END FUJITSU CONTROL','# BEGIN REDMI CONTROL\nif [ -x "$HOME/bin/redmi-control" ]; then\n  env -u RUNNER_TRACKING_ID -u GITHUB_ACTIONS -u CI "$HOME/bin/redmi-control" start || true\n  echo "Online: REDMI-CONTROL"\nfi\n# END REDMI CONTROL',s,flags=re.S)
-          p.write_text(s)
-          PY
-          rm -f "$HOME/bin/fujitsu-dashboard" "$HOME/bin/fujitsu-dashboard-status"
-          rm -rf "$HOME/fujitsu-dashboard" "$HOME/fujitsu-control"
-          (crontab -l 2>/dev/null | grep -v -E 'fujitsu-dashboard|fujitsu-build-home-tunnel|19860' || true) | crontab -
-          sleep 2
-          if ss -lnt 2>/dev/null | grep -qE ':9860\b'; then echo 'ERROR: Redmi still listening 9860'; ss -lntp | grep 9860 || true; exit 61; fi
-
-          echo '=== 5. OWNERSHIP PROOF ==='
-          echo REDMI_PORT_9860=CLOSED
-          curl -fsS http://127.0.0.1:9862/health; echo
-          curl -fsS http://127.0.0.1:9861/state; echo
-          "${SSH[@]}" 'curl -fsS http://192.168.1.99:9860/health; echo; curl -fsS http://192.168.1.99:9860/api/state | python3 -c "import json,sys;d=json.load(sys.stdin);assert d[\"source\"]==\"redmi-build\";assert d[\"dashboard_owner\"]==\"rapsi-nas\";print(\"RASPI_STATE\",sum(x[\"online\"] for x in d[\"runners\"]),len(d[\"runners\"]))"; sudo -n systemctl is-active redmi-dashboard.service; sudo -n systemctl is-active caddy'
-          echo RASPI_ONLY_DASHBOARD=PASS
+          "${SSH[@]}" 'echo ===STATUS===; sudo -n systemctl --no-pager -l status caddy || true; echo ===JOURNAL===; sudo -n journalctl -u caddy -n 120 --no-pager || true; echo ===LISTENERS===; sudo -n ss -lntp | grep -E ":(80|9860|9861|19861)\\b" || true; echo ===CADDYFILE===; sudo -n nl -ba /etc/caddy/Caddyfile | sed -n "1,180p"; echo ===UNIT===; sudo -n systemctl cat caddy; echo ===CAPS===; getcap "$(command -v caddy)" || true; echo ===VALIDATE===; sudo -n caddy validate --config /etc/caddy/Caddyfile || true'
