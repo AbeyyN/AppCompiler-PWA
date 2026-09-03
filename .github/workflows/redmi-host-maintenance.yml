@@ -13,27 +13,230 @@ permissions:
 jobs:
   host:
     runs-on: [self-hosted, linux, x64]
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
-      - name: Audit runner registration and rename path
+      - name: Move dashboard ownership to Raspi and leave Redmi telemetry-only
         shell: bash
         run: |
           set -euo pipefail
+          export PATH="$HOME/.local/bin:$HOME/bin:$PATH"
           echo "HOST=$(hostname) RUNNER=${RUNNER_NAME:-unknown}"
-          echo '=== GH AUTH SAFE ==='
-          gh auth status 2>&1 | sed -E 's/(Token:).*/\1 [REDACTED]/I' | head -60 || true
-          echo '=== REPO RUNNERS FROM GITHUB ==='
-          for repo in AppCompiler-PWA OpenWRT---AbeyyWRT SK-Gong-Kapas X7-Core-Academy XHomeNetwork XMA7 XSAHub XStay-Manager; do
-            echo "--- $repo ---"
-            gh api "repos/AbeyyN/$repo/actions/runners" --jq '.runners[]? | [.id,.name,(.labels|map(.name)|join(",")),.status,.busy] | @tsv' 2>/dev/null || echo API_DENIED
-          done
-          echo '=== LOCAL REREGISTER SCRIPT ==='
-          sed -n '1,240p' "$HOME/bin/fujitsu-reregister-all-runners" 2>/dev/null || true
-          echo '=== RUNNER HOOK REFERENCES ==='
-          grep -RInI -i 'fujitsu' "$HOME/actions-runner"/*/.env "$HOME/actions-runner"/*/.path 2>/dev/null | head -180 || true
-          echo '=== START ALL SCRIPT ==='
-          sed -n '1,220p' "$HOME/bin/start-all-github-runners.sh" 2>/dev/null || true
-          echo '=== CURRENT CADDYFILE ==='
+          test "$(hostname)" = redmi-build
+
           KEY="$HOME/.ssh/fujitsu-build-home"
           test -r "$KEY"
-          ssh -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new abeyy@192.168.1.99 'sudo -n sed -n "1,120p" /etc/caddy/Caddyfile'
+          SSH=(ssh -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new abeyy@192.168.1.99)
+          RSYNC_SSH="ssh -i $KEY -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new"
+          "${SSH[@]}" 'test "$(hostname)" = rapsi-nas'
+
+          echo '=== 1. COPY DASHBOARD CODE TO RASPI ==='
+          test -s "$HOME/fujitsu-dashboard/dashboard.py"
+          "${SSH[@]}" 'mkdir -p "$HOME/redmi-dashboard"'
+          rsync -a --delete -e "$RSYNC_SSH" "$HOME/fujitsu-dashboard/" abeyy@192.168.1.99:/home/abeyy/redmi-dashboard/
+          "${SSH[@]}" 'find "$HOME/redmi-dashboard" -type f -print0 | xargs -0 -r grep -Il "fujitsu\|Fujitsu\|FUJITSU" 2>/dev/null | while IFS= read -r f; do sed -i -e "s/FUJITSU/REDMI/g" -e "s/Fujitsu/Redmi/g" -e "s/fujitsu/redmi/g" "$f"; done; python3 -m py_compile "$HOME/redmi-dashboard/dashboard.py"'
+
+          echo '=== 2. INSTALL RASPI-OWNED DASHBOARD SERVICE ==='
+          "${SSH[@]}" 'sudo -n tee /etc/systemd/system/redmi-dashboard.service >/dev/null' <<'UNIT'
+          [Unit]
+          Description=986 Redmi Build Dashboard UI on Raspi
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          User=abeyy
+          WorkingDirectory=/home/abeyy/redmi-dashboard
+          Environment=REDMI_DASHBOARD_BIND=127.0.0.1
+          Environment=REDMI_DASHBOARD_PORT=19861
+          ExecStart=/usr/bin/python3 /home/abeyy/redmi-dashboard/dashboard.py
+          Restart=always
+          RestartSec=3
+
+          [Install]
+          WantedBy=multi-user.target
+          UNIT
+          "${SSH[@]}" 'sudo -n systemctl daemon-reload; sudo -n systemctl enable --now redmi-dashboard.service; for i in $(seq 1 30); do if curl -fsS --max-time 2 http://127.0.0.1:19861/ >/dev/null 2>&1; then exit 0; fi; sleep 1; done; sudo -n systemctl --no-pager status redmi-dashboard.service; exit 31'
+
+          echo '=== 3. INSTALL HEADLESS REDMI TELEMETRY ==='
+          mkdir -p "$HOME/redmi-telemetry" "$HOME/logs/actions-runner"
+          cat > "$HOME/redmi-telemetry/telemetry.py" <<'PY'
+          #!/usr/bin/env python3
+          import json, os, shutil, subprocess, threading, time
+          from datetime import datetime
+          from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+          from pathlib import Path
+
+          HOME=Path.home()
+          RUNNERS=[
+              ("AppCompiler-PWA","Redmi-PWA"),
+              ("AppCompiler-PWA-01","Redmi-PWA-01"),
+              ("OpenWRT---AbeyyWRT","Redmi-Ubuntu"),
+              ("OpenWRT---AbeyyWRT-light","Redmi-Ubuntu-Light"),
+              ("SK-Gong-Kapas","Redmi-Ubuntu"),
+              ("X7-Core-Academy","Redmi-Ubuntu"),
+              ("XHomeNetwork","Redmi-Ubuntu"),
+              ("XMA7","Redmi-Ubuntu"),
+              ("XSAHub","Redmi-Ubuntu"),
+              ("XStay-Manager","Redmi-Ubuntu-XStay"),
+          ]
+          ALLOWED={"127.0.0.1","192.168.1.99","192.168.1.1"}
+
+          def alive(directory):
+              pattern=str(HOME/"actions-runner"/directory/"bin"/"Runner.Listener")+" run"
+              return subprocess.run(["pgrep","-f",pattern],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0
+
+          def host_metrics():
+              out={"hostname":"redmi-build"}
+              try:
+                  out["threads"]=os.cpu_count() or 0
+                  out["load"]=float(Path('/proc/loadavg').read_text().split()[0])
+              except Exception: pass
+              try:
+                  mem={}
+                  for line in Path('/proc/meminfo').read_text().splitlines():
+                      if ':' in line:
+                          k,v=line.split(':',1); mem[k]=int(v.strip().split()[0])
+                  total=mem.get('MemTotal',0); avail=mem.get('MemAvailable',0)
+                  if total:
+                      out["mem_pct"]=round((total-avail)*100/total,1)
+                      out["mem_available_mb"]=round(avail/1024)
+              except Exception: pass
+              try:
+                  du=shutil.disk_usage('/')
+                  out["disk_pct"]=round(du.used*100/du.total,1)
+                  out["disk_free_gb"]=round(du.free/1024**3,1)
+              except Exception: pass
+              return out
+
+          def state():
+              runners=[]
+              for directory,name in RUNNERS:
+                  online=alive(directory)
+                  runners.append({"directory":directory,"name":name,"online":online,"status":"online" if online else "offline","busy":False})
+              return {
+                  "version":"redmi-telemetry-2.0",
+                  "source":"redmi-build",
+                  "dashboard_owner":"rapsi-nas",
+                  "host":host_metrics(),
+                  "runners":runners,
+                  "runs":[],"queue":[],"history":[],
+                  "scheduler":{"active":[],"queued":[]},
+                  "hermes":{},"error":None,
+                  "updated":datetime.now().astimezone().isoformat(timespec='seconds')
+              }
+
+          class H(BaseHTTPRequestHandler):
+              def log_message(self,*a): pass
+              def _send(self,obj,code=200):
+                  body=json.dumps(obj,separators=(',',':')).encode()
+                  self.send_response(code); self.send_header('Content-Type','application/json'); self.send_header('Cache-Control','no-store'); self.send_header('Content-Length',str(len(body))); self.end_headers(); self.wfile.write(body)
+              def do_GET(self):
+                  if self.client_address[0] not in ALLOWED:
+                      return self._send({"error":"forbidden"},403)
+                  s=state()
+                  if self.path in ('/api/state','/state'):
+                      return self._send(s)
+                  if self.path in ('/health','/healthz'):
+                      online=sum(1 for r in s['runners'] if r['online'])
+                      return self._send({"ok":online==len(s['runners']),"service":"redmi-telemetry","host":"redmi-build","runners":len(s['runners']),"online":online})
+                  return self._send({"error":"not found"},404)
+
+          if __name__=='__main__':
+              ThreadingHTTPServer(('0.0.0.0',9862),H).serve_forever()
+          PY
+          chmod 755 "$HOME/redmi-telemetry/telemetry.py"
+          python3 -m py_compile "$HOME/redmi-telemetry/telemetry.py"
+          cat > "$HOME/bin/redmi-telemetry" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          case "${1:-status}" in
+            start)
+              pgrep -f '/home/abeyy/redmi-telemetry/[t]elemetry.py' >/dev/null && exit 0
+              env -u RUNNER_TRACKING_ID nohup python3 "$HOME/redmi-telemetry/telemetry.py" >>"$HOME/logs/actions-runner/redmi-telemetry.log" 2>&1 </dev/null &
+              ;;
+            stop) pkill -TERM -f '/home/abeyy/redmi-telemetry/[t]elemetry.py' 2>/dev/null || true ;;
+            restart) "$0" stop; sleep 1; "$0" start ;;
+            status) curl -fsS --max-time 4 http://127.0.0.1:9862/health ;;
+            *) echo 'usage: redmi-telemetry {start|stop|restart|status}' >&2; exit 2 ;;
+          esac
+          EOF
+          chmod 755 "$HOME/bin/redmi-telemetry"
+          "$HOME/bin/redmi-telemetry" restart
+          for i in $(seq 1 30); do curl -fsS --max-time 2 http://127.0.0.1:9862/health >/dev/null 2>&1 && break; sleep 1; done
+          curl -fsS http://127.0.0.1:9862/health; echo
+          (crontab -l 2>/dev/null | grep -v '986-redmi-telemetry' || true; echo '@reboot sleep 25; /home/abeyy/bin/redmi-telemetry start # 986-redmi-telemetry') | crontab -
+          "${SSH[@]}" 'curl -fsS --max-time 5 http://192.168.1.96:9862/health'
+          echo
+
+          echo '=== 4. MAKE RASPI CADDY OWN BUILD DASHBOARD ==='
+          "${SSH[@]}" 'sudo -n cp -a /etc/caddy/Caddyfile /etc/caddy/Caddyfile.pre-redmi-dashboard-cutover-$(date +%Y%m%d-%H%M%S)'
+          "${SSH[@]}" 'python3 -' <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/Caddyfile.redmi.new')
+          src=Path('/etc/caddy/Caddyfile').read_text()
+          home='''# BUILD-HOME-BEGIN
+          http://build.home {
+              bind 192.168.1.99
+              handle /api/* {
+                  reverse_proxy 192.168.1.96:9862
+              }
+              handle /health {
+                  header Content-Type application/json
+                  header Cache-Control "no-store"
+                  respond `{"ok":true,"owner":"rapsi-nas","source":"redmi-build","service":"redmi-dashboard"}` 200
+              }
+              handle {
+                  reverse_proxy 127.0.0.1:19861
+              }
+          }
+          # BUILD-HOME-END'''
+          lan='''# BUILD-LAN-BEGIN
+          http://192.168.1.99:9860 {
+              handle /api/* {
+                  reverse_proxy 192.168.1.96:9862
+              }
+              handle /health {
+                  header Content-Type application/json
+                  header Cache-Control "no-store"
+                  respond `{"ok":true,"owner":"rapsi-nas","source":"redmi-build","service":"redmi-dashboard"}` 200
+              }
+              handle {
+                  reverse_proxy 127.0.0.1:19861
+              }
+          }
+          # BUILD-LAN-END'''
+          import re
+          src,n1=re.subn(r'# BUILD-HOME-BEGIN.*?# BUILD-HOME-END',home,src,flags=re.S)
+          src,n2=re.subn(r'# BUILD-LAN-BEGIN.*?# BUILD-LAN-END',lan,src,flags=re.S)
+          if n1!=1 or n2!=1: raise SystemExit(f'caddy markers mismatch home={n1} lan={n2}')
+          p.write_text(src)
+          PY
+          "${SSH[@]}" 'sudo -n install -m 644 /tmp/Caddyfile.redmi.new /etc/caddy/Caddyfile; sudo -n caddy validate --config /etc/caddy/Caddyfile; sudo -n systemctl reload caddy'
+
+          echo '=== 5. VERIFY RASPI DASHBOARD BEFORE REMOVING REDMI UI ==='
+          "${SSH[@]}" 'curl -fsS --max-time 5 -H "Host: build.home" http://192.168.1.99/ >/dev/null; curl -fsS --max-time 5 http://192.168.1.99:9860/health; echo; curl -fsS --max-time 5 http://192.168.1.99:9860/api/state | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get(\"source\"),d.get(\"dashboard_owner\"),sum(bool(x.get(\"online\")) for x in d.get(\"runners\",[])),len(d.get(\"runners\",[])))"'
+
+          echo '=== 6. REMOVE DASHBOARD OWNERSHIP FROM REDMI ==='
+          tmux kill-session -t fujitsu-dashboard 2>/dev/null || true
+          tmux kill-session -t fujitsu-build-home-tunnel 2>/dev/null || true
+          pkill -TERM -f '/home/abeyy/fujitsu-dashboard/[d]ashboard.py' 2>/dev/null || true
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          p=Path.home()/'bin/start-all-github-runners.sh'
+          s=p.read_text()
+          s=re.sub(r'\n?# BUILD-HOME-TUNNEL-BEGIN.*?# BUILD-HOME-TUNNEL-END\n?','\n',s,flags=re.S)
+          s=re.sub(r'\n?# BEGIN FUJITSU DASHBOARD.*?# END FUJITSU DASHBOARD\n?','\n',s,flags=re.S)
+          p.write_text(s)
+          PY
+          rm -f "$HOME/bin/fujitsu-dashboard" "$HOME/bin/fujitsu-dashboard-status"
+          rm -rf "$HOME/fujitsu-dashboard"
+          (crontab -l 2>/dev/null | grep -v -E 'fujitsu-dashboard|fujitsu-build-home-tunnel|19860' || true) | crontab -
+          sleep 2
+          if ss -lnt 2>/dev/null | grep -qE '[:.]9860\b'; then echo 'ERROR: Redmi still listening on 9860'; ss -lntp | grep 9860 || true; exit 61; fi
+
+          echo '=== FINAL OWNERSHIP PROOF ==='
+          echo 'REDMI_9860_LISTENER=NONE'
+          curl -fsS --max-time 5 http://127.0.0.1:9862/health; echo
+          "${SSH[@]}" 'curl -fsS --max-time 5 http://192.168.1.99:9860/health; echo; sudo -n systemctl is-active redmi-dashboard.service; sudo -n ss -lntp | grep -E "127.0.0.1:19861|:9860" | head -20'
+          echo RASPI_DASHBOARD_CUTOVER=PASS
