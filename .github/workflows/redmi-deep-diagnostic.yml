@@ -1,0 +1,46 @@
+name: Redmi Deep Diagnostic
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/redmi-deep-diagnostic.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: [self-hosted, linux, x64, redmi]
+    timeout-minutes: 12
+    steps:
+      - name: Inspect runner persistence and Raspi SSH
+        shell: bash
+        run: |
+          set +e
+          export HOME=/home/abeyy
+          export PATH="$HOME/.local/bin:$HOME/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+          echo "MACHINE=$(hostname) RUNNER=${RUNNER_NAME:-unknown} DATE=$(date -Is)"
+          echo '=== LISTENERS ==='
+          pgrep -af 'Runner.Listener run' || true
+          echo '=== MANAGER ==='
+          pgrep -af 'redmi-runner-manager|redmi-postjob-rescue' || true
+          echo '=== HOOK ENV ==='
+          grep -RniE 'RUNNER_TRACKING_ID|pkill|kill|Listener|manager|rescue' "$HOME/bin/redmi-job-started.sh" "$HOME/bin/redmi-job-completed.sh" 2>/dev/null || true
+          echo '-- started hook --'; sed -n '1,220p' "$HOME/bin/redmi-job-started.sh" 2>/dev/null || true
+          echo '-- completed hook --'; sed -n '1,260p' "$HOME/bin/redmi-job-completed.sh" 2>/dev/null || true
+          echo '=== CRON ==='
+          crontab -l 2>/dev/null || true
+          echo '=== MANAGER LOG ==='
+          tail -250 "$HOME/redmi-runner-manager.log" 2>/dev/null || true
+          echo '=== PER RUNNER TAILS ==='
+          for f in "$HOME"/logs/actions-runner/*.log; do echo "--- $f"; tail -35 "$f" 2>/dev/null; done
+          echo '=== TELEMETRY ==='
+          curl -fsS http://127.0.0.1:9862/health; echo
+          curl -fsS http://127.0.0.1:9862/api/status | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("summary")); print([(r.get("repo"),r.get("name"),r.get("status"),r.get("busy")) for r in d.get("runners",[])])' || true
+          echo '=== RASPI SSH ==='
+          KEY="$HOME/.ssh/redmi-build-home"
+          ls -l "$KEY" 2>&1 || true
+          ssh -vv -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new abeyy@192.168.1.99 'echo RASPI_OK; hostname; date -Is; sudo -n true; echo SUDO_RC=$?; ss -lntp | grep -E ":(19861|9860)\\b" || true; systemctl status redmi-dashboard.service --no-pager -l | head -60 || true' 2>&1 | tail -120
+          echo 'DIAGNOSTIC_DONE'
