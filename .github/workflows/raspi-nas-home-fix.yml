@@ -1,0 +1,48 @@
+name: Raspi nas.home Fix
+on:
+  push:
+    branches: [ops/raspi-nas-home-fix]
+    paths: ['.github/workflows/raspi-nas-home-fix.yml']
+  workflow_dispatch:
+jobs:
+  fix:
+    runs-on: [self-hosted, linux, x64, redmi]
+    timeout-minutes: 8
+    steps:
+      - name: Fix nas.home on Raspi only
+        shell: bash
+        run: |
+          set -euo pipefail
+          export HOME=/home/abeyy
+          KEY="$HOME/.ssh/redmi-build-home"
+          test -f "$KEY"
+          ssh -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new abeyy@192.168.1.99 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          SITE=/etc/nginx/sites-available/986-nas-home.conf
+          LINK=/etc/nginx/sites-enabled/986-nas-home.conf
+          C1=$(sudo sha256sum /etc/caddy/Caddyfile | awk '{print $1}')
+          cat >/tmp/986-nas-home.conf <<'NGINX'
+          server {
+              listen 192.168.1.98:80;
+              server_name nas.home;
+              return 302 http://192.168.1.98$request_uri;
+          }
+          NGINX
+          sudo install -o root -g root -m 0644 /tmp/986-nas-home.conf "$SITE"
+          sudo ln -sfn "$SITE" "$LINK"
+          sudo nginx -t
+          sudo systemctl reload nginx
+          sleep 2
+          C2=$(sudo sha256sum /etc/caddy/Caddyfile | awk '{print $1}')
+          test "$C1" = "$C2"
+          echo CADDY_UNTOUCHED=PASS
+          loc=$(curl -sSI -H 'Host: nas.home' http://192.168.1.98/ | awk 'BEGIN{IGNORECASE=1} /^Location:/{sub(/\r$/,""); print substr($0,11); exit}')
+          echo "LOCATION=$loc"
+          test "$loc" = 'http://192.168.1.98/'
+          echo NAS_HOME_NGINX=PASS
+          REMOTE
+          ans=$(nslookup nas.home 192.168.1.1 2>&1 | awk '/^Address: /{a=$2} END{print a}' || true)
+          echo "DNS=$ans"
+          test "$ans" = '192.168.1.98'
+          echo ADGUARD_UNTOUCHED=PASS
+          echo RASPI_NAS_HOME_FIX=PASS
