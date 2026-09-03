@@ -1,0 +1,38 @@
+name: Redmi Raspi SSH Diagnostic
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/redmi-raspi-ssh-diagnostic.yml']
+  workflow_dispatch:
+jobs:
+  diagnose:
+    runs-on: [self-hosted, linux, x64, redmi]
+    timeout-minutes: 8
+    steps:
+      - name: Diagnose Redmi to Raspi SSH
+        shell: bash
+        run: |
+          set +e
+          export HOME=/home/abeyy
+          KEY="$HOME/.ssh/redmi-build-home"
+          echo "HOST=$(hostname) RUNNER=${RUNNER_NAME:-unknown} DATE=$(date -Is)"
+          echo '=== KEY ==='
+          ls -l "$KEY" "$HOME/.ssh/known_hosts" 2>&1
+          stat -c '%a %U:%G %n' "$KEY" 2>&1
+          echo '=== ROUTE ==='
+          ip route get 192.168.1.99 2>&1
+          ping -c 2 -W 2 192.168.1.99 2>&1
+          echo '=== TCP22 ==='
+          timeout 5 bash -lc '</dev/tcp/192.168.1.99/22' && echo TCP22_OK || echo TCP22_FAIL
+          echo '=== SSH BASIC ==='
+          ssh -vv -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new abeyy@192.168.1.99 'echo SSH_OK; hostname; id; date -Is' 2>&1
+          rc=$?
+          echo "SSH_RC=$rc"
+          echo '=== SCP ROUNDTRIP ==='
+          printf '986-redmi-ssh-test\n' >/tmp/986-ssh-test.txt
+          scp -vv -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new /tmp/986-ssh-test.txt abeyy@192.168.1.99:/tmp/986-ssh-test.txt 2>&1
+          src=$?
+          echo "SCP_RC=$src"
+          ssh -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new abeyy@192.168.1.99 'cat /tmp/986-ssh-test.txt; rm -f /tmp/986-ssh-test.txt' 2>&1
+          echo "FINAL_SSH_RC=$?"
+          exit 0
