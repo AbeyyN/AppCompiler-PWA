@@ -1,0 +1,91 @@
+name: Redmi Post Rescue Verify
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 15
+    steps:
+      - name: Verify fleet telemetry dashboard and build environment
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          export HOME=/home/abeyy
+          [ -r "$HOME/bin/redmi-build-env.sh" ] && . "$HOME/bin/redmi-build-env.sh"
+          GH_LOCAL=(env -u GH_TOKEN -u GITHUB_TOKEN gh)
+          echo "MACHINE=$(hostname) RUNNER=${RUNNER_NAME:-unknown} DATE=$(date -Is)"
+
+          echo '=== GITHUB REDMI FLEET ==='
+          total=0; online=0; legacy=0
+          for repo in AppCompiler-PWA OpenWRT---AbeyyWRT SK-Gong-Kapas X7-Core-Academy XHomeNetwork XMA7 XSAHub XStay-Manager; do
+            j="$("${GH_LOCAL[@]}" api "repos/AbeyyN/$repo/actions/runners")"
+            echo "$j" | jq -r '.runners[]? | [.name,(.labels|map(.name)|join(",")),.status,.busy] | @tsv'
+            total=$((total+$(jq '[.runners[]? | select(([.labels[]?.name]|index("redmi"))!=null)]|length' <<<"$j")))
+            online=$((online+$(jq '[.runners[]? | select((([.labels[]?.name]|index("redmi"))!=null) and .status=="online")]|length' <<<"$j")))
+            legacy=$((legacy+$(jq '[.runners[]? | select((.name|test("Fujitsu|FUJITSU|fujitsu")) or (([.labels[]?.name]|index("fujitsu"))!=null))]|length' <<<"$j")))
+          done
+          echo "FLEET=$online/$total LEGACY=$legacy"
+          [ "$online" -eq 10 ] && [ "$total" -eq 10 ] && [ "$legacy" -eq 0 ]
+          echo "LOCAL_LISTENERS=$(pgrep -fc 'Runner.Listener run' || true)"
+          [ "$(pgrep -fc 'Runner.Listener run' || true)" -eq 10 ]
+
+          echo '=== TELEMETRY V3 ==='
+          sleep 5
+          curl -fsS http://127.0.0.1:9862/health; echo
+          T="$(curl -fsS http://127.0.0.1:9862/api/status)"
+          python3 - "$T" <<'PY'
+          import json,sys
+          d=json.loads(sys.argv[1]); s=d.get('system') or {}; m=s.get('memory') or {}; di=s.get('disk') or {}; su=d.get('summary') or {}
+          print('VERSION',d.get('version'),'CPU',s.get('cpu_percent'),'RAM',m.get('percent'),'DISK',di.get('percent'),'PROC',s.get('processes'))
+          print('RUNNERS',su.get('runner_online'),su.get('runner_total'),'PROJECTS',len(d.get('projects') or []),'HISTORY',len(d.get('history') or []),'QUEUE',len(d.get('queue') or []),'RUNS',len(d.get('runs') or []))
+          assert d.get('version')=='redmi-telemetry-3.0'
+          assert d.get('source')=='redmi-build' and d.get('dashboard_owner')=='rapsi-nas'
+          assert s.get('cpu_percent') is not None
+          assert m.get('percent') is not None and di.get('percent') is not None and s.get('processes') is not None
+          assert su.get('runner_total')==10 and su.get('runner_online')==10
+          assert len(d.get('projects') or [])>=8
+          assert len(d.get('history') or [])>0
+          PY
+
+          echo '=== RASPI DASHBOARD ==='
+          curl -fsS http://192.168.1.99:9860/health; echo
+          D="$(curl -fsS http://192.168.1.99:9860/api/status)"
+          python3 - "$D" <<'PY'
+          import json,sys
+          d=json.loads(sys.argv[1]); print('OWNER',d.get('dashboard_owner'),'SOURCE',d.get('source'),'VERSION',d.get('version'))
+          assert d.get('source')=='redmi-build' and d.get('dashboard_owner')=='rapsi-nas'
+          assert d.get('version')=='redmi-telemetry-3.0'
+          PY
+          H="$(curl -fsS http://192.168.1.99:9860/)"
+          grep -q 'Redmi Build Command Center' <<<"$H"
+          grep -q 'Live Performance Timeline' <<<"$H"
+          grep -q 'Runner / Build History' <<<"$H"
+          grep -q 'cpuSpark' <<<"$H"
+          grep -q 'setInterval(tick,1000)' <<<"$H"
+          echo 'DASHBOARD_UI=ANIMATED_LIVE_V3'
+
+          echo '=== REAL JOB DISPATCH PROOF ==='
+          run="$("${GH_LOCAL[@]}" api 'repos/AbeyyN/AppCompiler-PWA/actions/workflows/pwa-fleet.yml/runs?per_page=5')"
+          echo "$run" | jq -r '.workflow_runs[] | [.id,.status,.conclusion,.head_sha] | @tsv'
+          rid="$(jq -r '.workflow_runs[0].id' <<<"$run")"
+          jobs="$("${GH_LOCAL[@]}" api "repos/AbeyyN/AppCompiler-PWA/actions/runs/$rid/jobs")"
+          echo "$jobs" | jq -r '.jobs[]? | [.name,.status,.conclusion,.runner_name,(.labels|join(","))] | @tsv'
+          jq -e '.jobs[]? | select(.runner_name|startswith("Redmi-"))' <<<"$jobs" >/dev/null
+
+          echo '=== BUILD DEPENDENCIES ==='
+          for x in flutter dart adb sdkmanager git gh jq node npm java javac cmake ninja make gcc g++ rsync unzip zip xsltproc; do
+            command -v "$x" >/dev/null 2>&1 || { echo "MISSING_REQUIRED=$x"; exit 51; }
+            echo "OK $x=$(command -v "$x")"
+          done
+          printf 'int main(){return 0;}\n' >/tmp/986-m32.cpp
+          if g++ -m32 /tmp/986-m32.cpp -o /tmp/986-m32 >/tmp/986-m32.log 2>&1; then echo 'GXX_M32=PASS'; else echo 'GXX_M32=FAIL_OPTIONAL'; cat /tmp/986-m32.log; fi
+          command -v clang >/dev/null 2>&1 && echo "CLANG=$(command -v clang)" || echo 'CLANG=OPTIONAL_MISSING'
+          command -v docker >/dev/null 2>&1 && echo "DOCKER=$(command -v docker)" || echo 'DOCKER=NOT_REQUIRED_CURRENT_FLEET'
+          command -v ruby >/dev/null 2>&1 && echo "RUBY=$(command -v ruby)" || echo 'RUBY=NOT_REQUIRED_CURRENT_FLEET'
+
+          echo 'FINAL_REDMI_VERIFY=PASS'
