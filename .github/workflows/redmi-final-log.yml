@@ -1,0 +1,44 @@
+name: Redmi Final Cutover Diagnostic
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/redmi-final-log.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 3
+    steps:
+      - name: Read detached cutover state
+        shell: bash
+        run: |
+          set +e
+          export HOME=/home/abeyy
+          export PATH="$HOME/.local/bin:$HOME/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+          echo "MACHINE=$(hostname) RUNNER=${RUNNER_NAME:-unknown}"
+          echo '=== FINAL LOG ==='
+          tail -250 "$HOME/redmi-final-rename.log" 2>/dev/null || true
+          echo '=== PROCESSES ==='
+          pgrep -af 'redmi-final-rename|Runner.Listener|Runner.Worker|redmi-runner-manager' || true
+          echo '=== LOCAL REGISTRATION NAMES ==='
+          for d in "$HOME/actions-runner"/*; do [ -f "$d/.runner" ] || continue; printf '%s\t' "$(basename "$d")"; jq -r '.agentName // .name // "?"' "$d/.runner" 2>/dev/null || true; done
+          echo '=== GITHUB FLEET ==='
+          GH_LOCAL=(env -u GH_TOKEN -u GITHUB_TOKEN gh)
+          for repo in AppCompiler-PWA OpenWRT---AbeyyWRT SK-Gong-Kapas X7-Core-Academy XHomeNetwork XMA7 XSAHub XStay-Manager; do
+            echo "--- $repo ---"
+            "${GH_LOCAL[@]}" api "repos/AbeyyN/$repo/actions/runners" --jq '.runners[]? | [.id,.name,(.labels|map(.name)|join(",")),.status,.busy] | @tsv' || true
+          done
+          echo '=== DASHBOARD ==='
+          curl -fsS --max-time 8 http://192.168.1.99:9860/health; echo
+          curl -fsS --max-time 8 http://192.168.1.99:9860/api/state | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("source"),d.get("dashboard_owner"),[(x.get("directory"),x.get("name"),x.get("online")) for x in d.get("runners",[])])' || true
+          echo '=== LEGACY NAMES ==='
+          find "$HOME/bin" -maxdepth 1 -iname 'fujitsu*' -printf '%f -> %l\n' 2>/dev/null || true
+          echo '=== CRON/TMUX ==='
+          crontab -l 2>/dev/null || true
+          tmux ls 2>/dev/null || true
