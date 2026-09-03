@@ -18,15 +18,22 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
-      - name: Cancel stale or superseded build and free the surviving runner
+      - name: Force cancel superseded build and free the surviving runner
         shell: bash
         run: |
           set -euo pipefail
-          echo 'Canceling superseded PWA run that checked out the pre-repair script...'
-          gh api -X POST repos/AbeyyN/AppCompiler-PWA/actions/runs/33750122700/cancel >/dev/null 2>&1 || true
+          echo 'Force-canceling superseded PWA run that checked out pre-repair tooling...'
+          gh api -X POST repos/AbeyyN/AppCompiler-PWA/actions/runs/33750122700/force-cancel >/dev/null 2>&1 || \
+            gh api -X POST repos/AbeyyN/AppCompiler-PWA/actions/runs/33750122700/cancel >/dev/null 2>&1 || true
           echo 'Canceling stale migration audit if still queued...'
-          gh api -X POST repos/AbeyyN/XMA7/actions/runs/33718328344/cancel >/dev/null 2>&1 || true
-          sleep 5
+          gh api -X POST repos/AbeyyN/XMA7/actions/runs/33718328344/force-cancel >/dev/null 2>&1 || \
+            gh api -X POST repos/AbeyyN/XMA7/actions/runs/33718328344/cancel >/dev/null 2>&1 || true
+          for i in $(seq 1 12); do
+            s="$(gh api repos/AbeyyN/AppCompiler-PWA/actions/runs/33750122700 --jq '.status')"
+            echo "PWA_STATUS=$s"
+            [ "$s" = completed ] && break
+            sleep 5
+          done
           echo '-- AppCompiler recent runs --'
           gh api 'repos/AbeyyN/AppCompiler-PWA/actions/runs?per_page=12' --jq '.workflow_runs[] | [.id,.name,.status,.conclusion,.head_sha] | @tsv'
           echo 'ORCHESTRATOR_DONE'
