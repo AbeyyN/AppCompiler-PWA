@@ -1,0 +1,214 @@
+name: Redmi Full Repair
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/redmi-full-repair.yml'
+      - 'ops/redmi-telemetry-v3.py'
+      - 'ops/raspi-redmi-dashboard.py'
+      - 'ops/prepare-redmi-dashboard.py'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  repair:
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 45
+    steps:
+      - name: Checkout control repo
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+          clean: false
+
+      - name: Repair runner routing toolchain telemetry and Raspi dashboard
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          export HOME=/home/abeyy
+          export PATH="$HOME/.local/bin:$HOME/bin:$HOME/flutter/bin:$HOME/Android/Sdk/platform-tools:$HOME/Android/Sdk/cmdline-tools/latest/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+          GH_LOCAL=(env -u GH_TOKEN -u GITHUB_TOKEN gh)
+          test "$(hostname)" = redmi-build
+          echo "MACHINE=$(hostname) RUNNER=${RUNNER_NAME:-unknown} DATE=$(date -Is)"
+
+          echo '=== 1. FIX GLOBAL BUILD ENVIRONMENT ==='
+          mkdir -p "$HOME/.local/bin" "$HOME/.local/opt"
+          FLUTTER="$(find "$HOME" -maxdepth 6 -type f -path '*/bin/flutter' -perm -111 2>/dev/null | grep -v '/runner-work/' | head -1 || true)"
+          if [ -z "$FLUTTER" ]; then
+            echo 'Flutter SDK not found; installing user-local stable SDK'
+            rm -rf "$HOME/flutter.tmp"
+            git clone --depth 1 -b stable https://github.com/flutter/flutter.git "$HOME/flutter.tmp"
+            rm -rf "$HOME/flutter"
+            mv "$HOME/flutter.tmp" "$HOME/flutter"
+            FLUTTER="$HOME/flutter/bin/flutter"
+          fi
+          FLUTTER_ROOT="$(cd "$(dirname "$FLUTTER")/.." && pwd)"
+          ln -sfn "$FLUTTER" "$HOME/.local/bin/flutter"
+          [ -x "$FLUTTER_ROOT/bin/dart" ] && ln -sfn "$FLUTTER_ROOT/bin/dart" "$HOME/.local/bin/dart" || true
+
+          ADB="$(find "$HOME/Android/Sdk" -maxdepth 5 -type f -name adb -perm -111 2>/dev/null | head -1 || true)"
+          SDKMANAGER="$(find "$HOME/Android/Sdk" -maxdepth 7 -type f -name sdkmanager -perm -111 2>/dev/null | head -1 || true)"
+          if [ -z "$SDKMANAGER" ]; then
+            echo 'Android command-line tools missing; installing user-local copy'
+            tmp="$(mktemp -d)"
+            curl -fL --retry 3 -o "$tmp/cmdline.zip" https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+            rm -rf "$HOME/Android/Sdk/cmdline-tools/latest"
+            mkdir -p "$HOME/Android/Sdk/cmdline-tools/latest"
+            unzip -q "$tmp/cmdline.zip" -d "$tmp/unpack"
+            cp -a "$tmp/unpack/cmdline-tools/." "$HOME/Android/Sdk/cmdline-tools/latest/"
+            rm -rf "$tmp"
+            SDKMANAGER="$HOME/Android/Sdk/cmdline-tools/latest/bin/sdkmanager"
+          fi
+          ln -sfn "$SDKMANAGER" "$HOME/.local/bin/sdkmanager"
+          if [ -z "$ADB" ]; then
+            yes | "$SDKMANAGER" --sdk_root="$HOME/Android/Sdk" 'platform-tools' >/dev/null || true
+            ADB="$HOME/Android/Sdk/platform-tools/adb"
+          fi
+          [ -x "$ADB" ] && ln -sfn "$ADB" "$HOME/.local/bin/adb"
+
+          cat > "$HOME/bin/redmi-build-env.sh" <<EOF
+          #!/usr/bin/env bash
+          export ANDROID_HOME="$HOME/Android/Sdk"
+          export ANDROID_SDK_ROOT="$HOME/Android/Sdk"
+          export FLUTTER_ROOT="$FLUTTER_ROOT"
+          export PATH="$HOME/.local/bin:$HOME/bin:$FLUTTER_ROOT/bin:$HOME/Android/Sdk/platform-tools:$HOME/Android/Sdk/cmdline-tools/latest/bin:\$PATH"
+          EOF
+          chmod 755 "$HOME/bin/redmi-build-env.sh"
+          grep -q 'redmi-build-env.sh' "$HOME/.profile" 2>/dev/null || echo '[ -r "$HOME/bin/redmi-build-env.sh" ] && . "$HOME/bin/redmi-build-env.sh"' >> "$HOME/.profile"
+          grep -q 'redmi-build-env.sh' "$HOME/.bashrc" 2>/dev/null || echo '[ -r "$HOME/bin/redmi-build-env.sh" ] && . "$HOME/bin/redmi-build-env.sh"' >> "$HOME/.bashrc"
+          for d in "$HOME/actions-runner"/*; do
+            [ -f "$d/.env" ] || continue
+            awk '!/^ANDROID_HOME=|^ANDROID_SDK_ROOT=|^FLUTTER_ROOT=|^PATH=/' "$d/.env" > "$d/.env.new" || true
+            printf '%s\n' \
+              "ANDROID_HOME=$HOME/Android/Sdk" \
+              "ANDROID_SDK_ROOT=$HOME/Android/Sdk" \
+              "FLUTTER_ROOT=$FLUTTER_ROOT" \
+              "PATH=$HOME/.local/bin:$HOME/bin:$FLUTTER_ROOT/bin:$HOME/Android/Sdk/platform-tools:$HOME/Android/Sdk/cmdline-tools/latest/bin:/usr/local/bin:/usr/bin:/bin" \
+              >> "$d/.env.new"
+            mv "$d/.env.new" "$d/.env"
+          done
+          "$FLUTTER" config --no-analytics >/dev/null 2>&1 || true
+          yes | "$SDKMANAGER" --sdk_root="$HOME/Android/Sdk" --licenses >/dev/null 2>&1 || true
+          "$FLUTTER" precache --android >/dev/null 2>&1 || true
+
+          if ! command -v xsltproc >/dev/null 2>&1; then
+            echo 'Installing xsltproc user-local because system package is absent'
+            tmp="$(mktemp -d)"; cd "$tmp"
+            apt download xsltproc >/dev/null 2>&1 || true
+            deb="$(find . -maxdepth 1 -name 'xsltproc_*.deb' | head -1 || true)"
+            if [ -n "$deb" ]; then
+              mkdir -p "$HOME/.local/opt/xsltproc"
+              dpkg-deb -x "$deb" "$HOME/.local/opt/xsltproc"
+              x="$(find "$HOME/.local/opt/xsltproc" -type f -name xsltproc -perm -111 | head -1 || true)"
+              [ -n "$x" ] && ln -sfn "$x" "$HOME/.local/bin/xsltproc" || true
+            fi
+            cd "$HOME"; rm -rf "$tmp"
+          fi
+
+          echo '=== 2. RESTART ALL 10 REDMI LISTENERS WITH NEW ENV ==='
+          pkill -TERM -f '/home/abeyy/bin/[r]edmi-runner-manager.sh' 2>/dev/null || true
+          for d in "$HOME/actions-runner"/*; do
+            [ -f "$d/.runner" ] || continue
+            [ "$(basename "$d")" = "${RUNNER_NAME:-__none__}" ] || true
+          done
+          # Do not terminate the listener currently executing this job. Other listeners may be safely recycled.
+          case "${RUNNER_NAME:-}" in
+            Redmi-PWA) CURRENT_DIR=AppCompiler-PWA ;;
+            Redmi-PWA-01) CURRENT_DIR=AppCompiler-PWA-01 ;;
+            *) CURRENT_DIR='' ;;
+          esac
+          for d in "$HOME/actions-runner"/*; do
+            [ -f "$d/.runner" ] || continue
+            [ "$(basename "$d")" = "$CURRENT_DIR" ] && continue
+            pkill -TERM -f "$d/bin/[R]unner.Listener run" 2>/dev/null || true
+          done
+          sleep 3
+          env -u RUNNER_TRACKING_ID -u GITHUB_ACTIONS -u CI nohup "$HOME/bin/redmi-runner-manager.sh" >>"$HOME/redmi-runner-manager.nohup.log" 2>&1 </dev/null &
+          sleep 10
+
+          echo '=== 3. CLEAR STALE FUJITSU-LABEL QUEUES AND RESTART PWA FLEET ==='
+          "${GH_LOCAL[@]}" api -X POST repos/AbeyyN/AppCompiler-PWA/actions/runs/33739852861/cancel >/dev/null 2>&1 || true
+          "${GH_LOCAL[@]}" api -X POST repos/AbeyyN/XMA7/actions/runs/33718328344/cancel >/dev/null 2>&1 || true
+          "${GH_LOCAL[@]}" workflow run pwa-fleet.yml -R AbeyyN/AppCompiler-PWA --ref main || true
+
+          echo '=== 4. SWEEP ACTIVE DEFAULT WORKFLOWS FOR LEGACY FUJITSU ROUTING ==='
+          SWEEP="$(mktemp -d)"
+          for repo in AppCompiler-PWA OpenWRT---AbeyyWRT SK-Gong-Kapas X7-Core-Academy XHomeNetwork XMA7 XSAHub XStay-Manager; do
+            dst="$SWEEP/$repo"
+            "${GH_LOCAL[@]}" repo clone "AbeyyN/$repo" "$dst" -- --depth 1 >/dev/null 2>&1 || continue
+            cd "$dst"
+            [ -d .github/workflows ] || { cd "$HOME"; continue; }
+            while IFS= read -r f; do
+              [ -n "$f" ] || continue
+              sed -i -e 's/FUJITSU/REDMI/g' -e 's/Fujitsu/Redmi/g' -e 's/fujitsu/redmi/g' "$f"
+            done < <(grep -RIl -E 'FUJITSU|Fujitsu|fujitsu' .github/workflows 2>/dev/null || true)
+            git config user.name 'AbeyyTechXy Ops'; git config user.email 'abeyytechxy.dev@gmail.com'
+            git add .github/workflows
+            if ! git diff --cached --quiet; then
+              git commit -m 'ci: remove final Fujitsu runner routing [skip ci]' >/dev/null
+              git push >/dev/null
+              echo "WORKFLOW_SWEEP_UPDATED $repo"
+            fi
+            cd "$HOME"
+          done
+          rm -rf "$SWEEP"
+
+          echo '=== 5. DEPLOY TELEMETRY V3 ON REDMI (NO DASHBOARD UI) ==='
+          mkdir -p "$HOME/redmi-telemetry"
+          cp "$GITHUB_WORKSPACE/ops/redmi-telemetry-v3.py" "$HOME/redmi-telemetry/telemetry.py"
+          chmod 755 "$HOME/redmi-telemetry/telemetry.py"
+          "$HOME/bin/redmi-telemetry" stop >/dev/null 2>&1 || true
+          pkill -TERM -f '/home/abeyy/redmi-telemetry/[t]elemetry.py' 2>/dev/null || true
+          sleep 2
+          "$HOME/bin/redmi-telemetry" start >/dev/null 2>&1 || true
+          sleep 3
+          if ! curl -fsS http://127.0.0.1:9862/health >/dev/null; then
+            env -u RUNNER_TRACKING_ID -u GITHUB_ACTIONS -u CI nohup python3 "$HOME/redmi-telemetry/telemetry.py" >>"$HOME/redmi-telemetry/telemetry.log" 2>&1 </dev/null &
+            sleep 4
+          fi
+          curl -fsS http://127.0.0.1:9862/health; echo
+          curl -fsS http://127.0.0.1:9862/api/status | python3 -c 'import json,sys;d=json.load(sys.stdin); print("TELEMETRY",d.get("version"),"CPU",d.get("system",{}).get("cpu_percent"),"RUNNERS",d.get("summary",{}).get("runner_online"),"/",d.get("summary",{}).get("runner_total"),"PROJECTS",len(d.get("projects",[])))'
+
+          echo '=== 6. RESTORE FULL ANIMATED DASHBOARD ON RASPI ==='
+          cd "$GITHUB_WORKSPACE"
+          python3 ops/prepare-redmi-dashboard.py
+          KEY="$HOME/.ssh/redmi-build-home"
+          test -r "$KEY"
+          SSH=(ssh -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new abeyy@192.168.1.99)
+          SCP=(scp -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new)
+          "${SSH[@]}" 'mkdir -p /home/abeyy/redmi-dashboard; cp -a /home/abeyy/redmi-dashboard/dashboard.py /home/abeyy/redmi-dashboard/dashboard.py.pre-v3-$(date +%Y%m%d-%H%M%S) 2>/dev/null || true; cp -a /home/abeyy/redmi-dashboard/index.html /home/abeyy/redmi-dashboard/index.html.pre-v3-$(date +%Y%m%d-%H%M%S) 2>/dev/null || true'
+          "${SCP[@]}" /tmp/redmi-dashboard-index.html abeyy@192.168.1.99:/home/abeyy/redmi-dashboard/index.html
+          "${SCP[@]}" "$GITHUB_WORKSPACE/ops/raspi-redmi-dashboard.py" abeyy@192.168.1.99:/home/abeyy/redmi-dashboard/dashboard.py
+          "${SSH[@]}" 'chmod 755 /home/abeyy/redmi-dashboard/dashboard.py; sudo -n systemctl restart redmi-dashboard.service; sleep 3; systemctl is-active redmi-dashboard.service; curl -fsS http://192.168.1.99:9860/health; echo; curl -fsS http://192.168.1.99:9860/api/status | python3 -c '\''import json,sys;d=json.load(sys.stdin);print("RASPI_UI_SOURCE",d.get("source"),"VERSION",d.get("version"),"CPU",d.get("system",{}).get("cpu_percent"),"HISTORY",len(d.get("history",[])))'\'''
+
+          echo '=== 7. VERIFY TOOLCHAIN ==='
+          . "$HOME/bin/redmi-build-env.sh"
+          for x in flutter dart adb sdkmanager git gh node npm java javac cmake ninja make gcc g++ rsync unzip zip xsltproc; do
+            command -v "$x" >/dev/null 2>&1 && echo "TOOL_OK $x $(command -v "$x")" || echo "TOOL_MISSING $x"
+          done
+          flutter --version | head -4
+          adb version | head -2 || true
+          echo 'OpenWrt optional host packages not required by current build path:'
+          for p in clang g++-multilib python3-distutils; do dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q 'install ok installed' || echo "OPTIONAL_NOT_SYSTEM_INSTALLED $p"; done
+
+          echo '=== 8. FINAL RUNNER / QUEUE AUDIT ==='
+          online=0; total=0; busy=0; legacy=0
+          for repo in AppCompiler-PWA OpenWRT---AbeyyWRT SK-Gong-Kapas X7-Core-Academy XHomeNetwork XMA7 XSAHub XStay-Manager; do
+            j="$("${GH_LOCAL[@]}" api "repos/AbeyyN/$repo/actions/runners")"
+            echo "$j" | jq -r '.runners[]? | [.name,(.labels|map(.name)|join(",")),.status,.busy] | @tsv'
+            total=$((total+$(jq '[.runners[]? | select(([.labels[]?.name]|index("redmi"))!=null)]|length' <<<"$j")))
+            online=$((online+$(jq '[.runners[]? | select((([.labels[]?.name]|index("redmi"))!=null) and .status=="online")]|length' <<<"$j")))
+            busy=$((busy+$(jq '[.runners[]? | select((([.labels[]?.name]|index("redmi"))!=null) and .busy==true)]|length' <<<"$j")))
+            legacy=$((legacy+$(jq '[.runners[]? | select((.name|test("Fujitsu|FUJITSU|fujitsu")) or (([.labels[]?.name]|index("fujitsu"))!=null))]|length' <<<"$j")))
+          done
+          echo "FINAL_FLEET ONLINE=$online/$total BUSY=$busy LEGACY=$legacy"
+          [ "$online" -eq 10 ] && [ "$total" -eq 10 ] && [ "$legacy" -eq 0 ]
+          echo '-- active/queued --'
+          for repo in AppCompiler-PWA XMA7; do
+            "${GH_LOCAL[@]}" api "repos/AbeyyN/$repo/actions/runs?per_page=20" --jq '.workflow_runs[] | select(.status=="queued" or .status=="in_progress") | [.id,.status,.head_branch,.path,.display_title] | @tsv' || true
+          done
+          echo 'REDMI_FULL_REPAIR_PASS'
