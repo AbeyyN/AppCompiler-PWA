@@ -15,18 +15,25 @@ jobs:
     runs-on: [self-hosted, linux, x64]
     timeout-minutes: 20
     steps:
-      - name: Inspect Raspi dashboard ownership
+      - name: Audit runner registration and rename path
         shell: bash
         run: |
           set -euo pipefail
           echo "HOST=$(hostname) RUNNER=${RUNNER_NAME:-unknown}"
+          echo '=== GH AUTH SAFE ==='
+          gh auth status 2>&1 | sed -E 's/(Token:).*/\1 [REDACTED]/I' | head -60 || true
+          echo '=== REPO RUNNERS FROM GITHUB ==='
+          for repo in AppCompiler-PWA OpenWRT---AbeyyWRT SK-Gong-Kapas X7-Core-Academy XHomeNetwork XMA7 XSAHub XStay-Manager; do
+            echo "--- $repo ---"
+            gh api "repos/AbeyyN/$repo/actions/runners" --jq '.runners[]? | [.id,.name,(.labels|map(.name)|join(",")),.status,.busy] | @tsv' 2>/dev/null || echo API_DENIED
+          done
+          echo '=== LOCAL REREGISTER SCRIPT ==='
+          sed -n '1,240p' "$HOME/bin/fujitsu-reregister-all-runners" 2>/dev/null || true
+          echo '=== RUNNER HOOK REFERENCES ==='
+          grep -RInI -i 'fujitsu' "$HOME/actions-runner"/*/.env "$HOME/actions-runner"/*/.path 2>/dev/null | head -180 || true
+          echo '=== START ALL SCRIPT ==='
+          sed -n '1,220p' "$HOME/bin/start-all-github-runners.sh" 2>/dev/null || true
+          echo '=== CURRENT CADDYFILE ==='
           KEY="$HOME/.ssh/fujitsu-build-home"
           test -r "$KEY"
-          SSH=(ssh -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new abeyy@192.168.1.99)
-          echo '=== REDMI ENDPOINTS ==='
-          curl -fsS --max-time 4 http://127.0.0.1:9860/health || true; echo
-          curl -fsS --max-time 4 http://127.0.0.1:9861/state | head -c 4000 || true; echo
-          echo '=== RASPI ENDPOINTS ==='
-          "${SSH[@]}" 'for u in http://127.0.0.1:9860/health http://127.0.0.1:9860/api/state http://127.0.0.1:9861/healthz http://127.0.0.1:9861/state; do echo ---$u---; curl -fsS --max-time 4 "$u" 2>/dev/null | head -c 3500 || true; echo; done'
-          echo '=== RASPI OWNERS ==='
-          "${SSH[@]}" 'sudo -n ss -lntp 2>/dev/null | grep -E ":(9860|9861)\\b" || true; echo ---processes---; ps -eo pid=,ppid=,etime=,args= | grep -Ei "9860|9861|dashboard|fujitsu-control|redmi-control" | grep -v grep | head -100 || true; echo ---units---; sudo -n systemctl --no-pager --all | grep -Ei "dashboard|fujitsu|redmi|986" | head -120 || true; echo ---refs---; sudo -n grep -RInI -E "9860|9861|FUJITSU|Fujitsu|fujitsu" /etc/systemd/system /etc/nginx /etc/caddy 2>/dev/null | head -260 || true'
+          ssh -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new abeyy@192.168.1.99 'sudo -n sed -n "1,120p" /etc/caddy/Caddyfile'
