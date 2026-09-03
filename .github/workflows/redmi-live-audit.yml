@@ -1,0 +1,89 @@
+name: Redmi Live Audit
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/redmi-live-audit.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 12
+    steps:
+      - name: Audit live fleet dashboard and toolchain
+        shell: bash
+        run: |
+          set +e
+          export HOME=/home/abeyy
+          export PATH="$HOME/.local/bin:$HOME/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+          echo "MACHINE=$(hostname) RUNNER=${RUNNER_NAME:-unknown} DATE=$(date -Is)"
+          GH_LOCAL=(env -u GH_TOKEN -u GITHUB_TOKEN gh)
+
+          echo '=== LOCAL RUNNERS ==='
+          for d in "$HOME/actions-runner"/*; do
+            [ -f "$d/.runner" ] || continue
+            printf '%s\t' "$(basename "$d")"
+            jq -r '[.agentName,.workFolder] | @tsv' "$d/.runner" 2>/dev/null || true
+          done
+          echo '-- listeners --'
+          pgrep -af 'Runner.Listener run' || true
+          echo '-- workers --'
+          pgrep -af 'Runner.Worker' || true
+
+          echo '=== GITHUB FLEET ==='
+          for repo in AppCompiler-PWA OpenWRT---AbeyyWRT SK-Gong-Kapas X7-Core-Academy XHomeNetwork XMA7 XSAHub XStay-Manager; do
+            echo "--- $repo ---"
+            "${GH_LOCAL[@]}" api "repos/AbeyyN/$repo/actions/runners" --jq '.runners[]? | [.id,.name,(.labels|map(.name)|join(",")),.status,.busy] | @tsv' 2>&1 || true
+          done
+
+          echo '=== QUEUED/RUNNING BUILDS ==='
+          for repo in AppCompiler-PWA OpenWRT---AbeyyWRT SK-Gong-Kapas X7-Core-Academy XHomeNetwork XMA7 XSAHub XStay-Manager; do
+            echo "--- $repo ---"
+            "${GH_LOCAL[@]}" api "repos/AbeyyN/$repo/actions/runs?per_page=30" --jq '.workflow_runs[] | select(.status=="queued" or .status=="in_progress") | [.id,.status,.head_branch,.path,.display_title] | @tsv' 2>/dev/null || true
+          done
+
+          echo '=== CURRENT TELEMETRY ==='
+          curl -fsS http://127.0.0.1:9862/health; echo
+          curl -fsS http://127.0.0.1:9862/state | python3 -m json.tool 2>/dev/null | head -220 || true
+          echo '-- telemetry files --'
+          find "$HOME/redmi-telemetry" "$HOME/bin" -maxdepth 2 -type f \( -name '*telemetry*' -o -name '*dashboard*' \) -print 2>/dev/null || true
+
+          echo '=== RASPI DASHBOARD ==='
+          KEY="$HOME/.ssh/redmi-build-home"
+          echo "KEY=$([ -r "$KEY" ] && echo YES || echo NO)"
+          if [ -r "$KEY" ]; then
+            ssh -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new abeyy@192.168.1.99 '
+              echo HOST=$(hostname); id; 
+              echo -- health --; curl -fsS http://192.168.1.99:9860/health; echo;
+              echo -- service --; systemctl status redmi-dashboard.service --no-pager -l 2>&1 | head -50 || true;
+              echo -- sudo --; sudo -n true >/dev/null 2>&1 && echo SUDO_N=YES || echo SUDO_N=NO;
+              echo -- proc --; pgrep -af "9860|redmi-dashboard" || true;
+              echo -- files --; find /home/abeyy -maxdepth 4 -type f \( -iname "*dashboard*" -o -iname "*fujitsu*" \) 2>/dev/null | head -100
+            ' 2>&1 || true
+          fi
+
+          echo '=== TOOLCHAIN ==='
+          for x in git gh jq tmux curl wget python3 pip3 node npm npx java javac flutter dart adb sdkmanager cmake ninja make gcc g++ clang docker podman rsync unzip zip tar xz perl ruby; do
+            if command -v "$x" >/dev/null 2>&1; then printf '%-12s OK  ' "$x"; "$x" --version 2>&1 | head -1 || true; else echo "$x MISSING"; fi
+          done
+          echo '-- Android SDK --'
+          echo "ANDROID_HOME=${ANDROID_HOME:-} ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-}"
+          find "$HOME/Android/Sdk/platforms" -maxdepth 1 -mindepth 1 -printf '%f\n' 2>/dev/null | sort -V | tail -10 || true
+          find "$HOME/Android/Sdk/build-tools" -maxdepth 1 -mindepth 1 -printf '%f\n' 2>/dev/null | sort -V | tail -10 || true
+          echo '-- Flutter doctor --'
+          flutter doctor -v 2>&1 | head -180 || true
+
+          echo '=== COMMON OPENWRT BUILD PACKAGES ==='
+          req='build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev python3 python3-distutils python3-setuptools rsync swig unzip zlib1g-dev file wget curl time xsltproc libelf-dev'
+          for p in $req; do dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q 'install ok installed' || echo "MISSING_PKG $p"; done
+
+          echo '=== OLD FUJITSU ARTIFACT SEARCH ==='
+          find "$HOME" -maxdepth 5 -type f \( -iname '*fujitsu*' -o -iname '*package*list*' -o -iname '*dpkg*' -o -iname '*migration*manifest*' \) 2>/dev/null | head -180
+          grep -RIl -E 'Fujitsu Build|FUJITSU BUILD|Command Center|runner history' "$HOME" 2>/dev/null | head -100
+
+          echo 'AUDIT_DONE'
