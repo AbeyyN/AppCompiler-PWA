@@ -1,0 +1,32 @@
+name: Redmi Emergency Orchestrator
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/redmi-emergency-orchestrator.yml'
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  orchestrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Cancel stale or superseded build and free the surviving runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'Canceling superseded PWA run that checked out the pre-repair script...'
+          gh api -X POST repos/AbeyyN/AppCompiler-PWA/actions/runs/33750122700/cancel >/dev/null 2>&1 || true
+          echo 'Canceling stale migration audit if still queued...'
+          gh api -X POST repos/AbeyyN/XMA7/actions/runs/33718328344/cancel >/dev/null 2>&1 || true
+          sleep 5
+          echo '-- AppCompiler recent runs --'
+          gh api 'repos/AbeyyN/AppCompiler-PWA/actions/runs?per_page=12' --jq '.workflow_runs[] | [.id,.name,.status,.conclusion,.head_sha] | @tsv'
+          echo 'ORCHESTRATOR_DONE'
