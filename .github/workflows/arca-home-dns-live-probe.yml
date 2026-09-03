@@ -1,0 +1,27 @@
+name: ARCA Home DNS Live Probe
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/arca-home-dns-live-probe.yml']
+  workflow_dispatch:
+jobs:
+  probe:
+    runs-on: [self-hosted, linux, x64, redmi]
+    timeout-minutes: 5
+    steps:
+      - name: Read current DNS state while repair runs
+        shell: bash
+        run: |
+          set -u
+          export HOME=/home/abeyy
+          echo '=== FROM REDMI ==='
+          for h in home.home status.home jellyfin.home immich.home build.home builds.home nas.home; do
+            echo "---$h---"; timeout 3 nslookup "$h" 192.168.1.1 2>&1 || true
+          done
+          echo '=== ROUTER API/CFG ==='
+          ssh -i "$HOME/.ssh/id_ed25519" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=5 root@192.168.1.1 '
+            curl -fsS --max-time 3 http://127.0.0.1:3000/control/rewrite/list 2>&1 || true; echo
+            grep -nE "rewrites:|domain: (home|status|jellyfin|immich|build|builds|nas)\.home|answer: 192\.168\.1\.(98|99)|enabled:" /etc/adguardhome/adguardhome.yaml | tail -80 || true
+            pgrep -af AdGuardHome || true
+          ' || true
+          echo LIVE_PROBE_DONE
