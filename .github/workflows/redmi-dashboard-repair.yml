@@ -56,7 +56,8 @@ jobs:
             set -e
             chmod 755 /home/abeyy/redmi-dashboard/dashboard.py
             sudo -n systemctl stop redmi-dashboard.service 2>/dev/null || true
-            pkill -TERM -f "/home/abeyy/redmi-dashboard/[d]ashboard.py" 2>/dev/null || true
+            pids=$(pgrep -f "^/usr/bin/python3 /home/abeyy/redmi-dashboard/dashboard\\.py$" || true)
+            [ -z "$pids" ] || kill -TERM $pids
             sleep 1
             sudo -n tee /etc/systemd/system/redmi-dashboard.service >/dev/null <<"UNIT"
           [Unit]
