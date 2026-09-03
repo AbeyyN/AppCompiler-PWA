@@ -1,0 +1,115 @@
+name: Redmi Listener Rescue
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/redmi-listener-rescue.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  rescue:
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 10
+    steps:
+      - name: Schedule persistent post-job listener rescue
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          export HOME=/home/abeyy
+          export PATH="$HOME/.local/bin:$HOME/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+          test "$(hostname)" = redmi-build
+          echo "MACHINE=$(hostname) RUNNER=${RUNNER_NAME:-unknown}"
+
+          cat > "$HOME/bin/redmi-runner-manager.sh" <<'MANAGER'
+          #!/usr/bin/env bash
+          set -u
+          export HOME=/home/abeyy
+          [ -r "$HOME/bin/redmi-build-env.sh" ] && . "$HOME/bin/redmi-build-env.sh"
+          mkdir -p "$HOME/logs/actions-runner"
+          exec 9>"$HOME/.redmi-runner-manager.lock"
+          flock -n 9 || exit 0
+          dirs=(AppCompiler-PWA AppCompiler-PWA-01 OpenWRT---AbeyyWRT OpenWRT---AbeyyWRT-light SK-Gong-Kapas X7-Core-Academy XHomeNetwork XMA7 XSAHub XStay-Manager)
+          alive(){ pgrep -f "$HOME/actions-runner/$1/bin/[R]unner.Listener run" >/dev/null 2>&1; }
+          start_one(){
+            local n="$1" d="$HOME/actions-runner/$1" log="$HOME/logs/actions-runner/$1.log"
+            [ -f "$d/.runner" ] || return 0
+            alive "$n" && return 0
+            echo "$(date -Is) START $n" >> "$HOME/redmi-runner-manager.log"
+            setsid -f env -u RUNNER_TRACKING_ID -u GITHUB_ACTIONS -u CI bash -lc "source /home/abeyy/bin/redmi-build-env.sh 2>/dev/null || true; cd '$d'; exec ./run.sh >>'$log' 2>&1" </dev/null >/dev/null 2>&1 || true
+          }
+          while true; do
+            for n in "${dirs[@]}"; do start_one "$n"; done
+            sleep 12
+          done
+          MANAGER
+          chmod 755 "$HOME/bin/redmi-runner-manager.sh"
+
+          cat > "$HOME/bin/redmi-postjob-rescue.sh" <<'RESCUE'
+          #!/usr/bin/env bash
+          set -u
+          export HOME=/home/abeyy
+          export PATH="$HOME/.local/bin:$HOME/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+          [ -r "$HOME/bin/redmi-build-env.sh" ] && . "$HOME/bin/redmi-build-env.sh"
+          LOG="$HOME/redmi-postjob-rescue.log"
+          exec >>"$LOG" 2>&1
+          echo "===== RESCUE $(date -Is) ====="
+          dirs=(AppCompiler-PWA AppCompiler-PWA-01 OpenWRT---AbeyyWRT OpenWRT---AbeyyWRT-light SK-Gong-Kapas X7-Core-Academy XHomeNetwork XMA7 XSAHub XStay-Manager)
+          alive(){ pgrep -f "$HOME/actions-runner/$1/bin/[R]unner.Listener run" >/dev/null 2>&1; }
+          start_one(){
+            n="$1"; d="$HOME/actions-runner/$n"; log="$HOME/logs/actions-runner/$n.log"
+            [ -f "$d/.runner" ] || { echo "NO_REG $n"; return; }
+            if alive "$n"; then echo "ALIVE $n"; return; fi
+            echo "START $n"
+            setsid -f env -u RUNNER_TRACKING_ID -u GITHUB_ACTIONS -u CI bash -lc "source /home/abeyy/bin/redmi-build-env.sh 2>/dev/null || true; cd '$d'; exec ./run.sh >>'$log' 2>&1" </dev/null >/dev/null 2>&1 || true
+          }
+          for round in 1 2 3 4 5 6; do
+            echo "ROUND=$round"
+            for n in "${dirs[@]}"; do start_one "$n"; done
+            sleep 12
+            c="$(pgrep -fc 'Runner.Listener run' || true)"
+            echo "LISTENERS=$c"
+            [ "$c" -ge 10 ] && break
+          done
+          pkill -TERM -f '/home/abeyy/bin/[r]edmi-runner-manager.sh' 2>/dev/null || true
+          sleep 2
+          setsid -f env -u RUNNER_TRACKING_ID -u GITHUB_ACTIONS -u CI bash -lc 'exec /home/abeyy/bin/redmi-runner-manager.sh >>/home/abeyy/redmi-runner-manager.nohup.log 2>&1' </dev/null >/dev/null 2>&1 || true
+          sleep 8
+          echo '-- local listeners --'
+          pgrep -af 'Runner.Listener run' || true
+
+          GH_LOCAL=(env -u GH_TOKEN -u GITHUB_TOKEN gh)
+          online=0; total=0
+          for repo in AppCompiler-PWA OpenWRT---AbeyyWRT SK-Gong-Kapas X7-Core-Academy XHomeNetwork XMA7 XSAHub XStay-Manager; do
+            j="$("${GH_LOCAL[@]}" api "repos/AbeyyN/$repo/actions/runners" 2>/dev/null || echo '{"runners":[]}')"
+            echo "$j" | jq -r '.runners[]? | [.name,.status,.busy] | @tsv'
+            total=$((total+$(jq '[.runners[]? | select(([.labels[]?.name]|index("redmi"))!=null)]|length' <<<"$j")))
+            online=$((online+$(jq '[.runners[]? | select((([.labels[]?.name]|index("redmi"))!=null) and .status=="online")]|length' <<<"$j")))
+          done
+          echo "GITHUB=$online/$total"
+
+          # Restart telemetry only after listeners are stable so v3 starts with a complete fleet.
+          if [ "$online" -eq 10 ]; then
+            pkill -TERM -f '/home/abeyy/redmi-telemetry/[t]elemetry.py' 2>/dev/null || true
+            sleep 2
+            setsid -f env -u RUNNER_TRACKING_ID -u GITHUB_ACTIONS -u CI bash -lc 'exec python3 /home/abeyy/redmi-telemetry/telemetry.py >>/home/abeyy/redmi-telemetry/telemetry.log 2>&1' </dev/null >/dev/null 2>&1 || true
+            sleep 12
+            curl -fsS http://127.0.0.1:9862/health || true; echo
+            curl -fsS http://192.168.1.99:9860/health || true; echo
+            "${GH_LOCAL[@]}" workflow run redmi-post-rescue-verify.yml -R AbeyyN/AppCompiler-PWA --ref main || true
+          else
+            echo 'RESCUE_INCOMPLETE'
+          fi
+          echo "RESCUE_DONE $(date -Is)"
+          RESCUE
+          chmod 755 "$HOME/bin/redmi-postjob-rescue.sh"
+
+          # Current Actions worker must exit before we create the missing long-lived listeners.
+          # setsid + cleared tracking vars prevents GitHub runner orphan cleanup from killing the rescue.
+          rm -f "$HOME/redmi-postjob-rescue-launch.log"
+          setsid -f env -u RUNNER_TRACKING_ID -u GITHUB_ACTIONS -u CI bash -lc 'sleep 18; exec /home/abeyy/bin/redmi-postjob-rescue.sh' >>"$HOME/redmi-postjob-rescue-launch.log" 2>&1 </dev/null
+          echo 'POSTJOB_RESCUE_SCHEDULED=YES'
