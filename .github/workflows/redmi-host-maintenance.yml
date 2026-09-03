@@ -1,4 +1,4 @@
-name: Redmi Host Maintenance
+name: Redmi Host Verification
 
 on:
   push:
@@ -11,27 +11,85 @@ permissions:
   contents: read
 
 jobs:
-  host:
+  verify:
     runs-on: [self-hosted, linux, x64]
-    timeout-minutes: 5
+    timeout-minutes: 8
     steps:
-      - name: Launch detached final Redmi runner rename
+      - name: Verify Redmi fleet and Raspi-only dashboard
         shell: bash
         run: |
           set -euo pipefail
           export HOME=/home/abeyy
           export PATH="$HOME/.local/bin:$HOME/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
           test "$(hostname)" = redmi-build
-          test -x "$HOME/bin/redmi-final-rename.sh"
-          test -x "$HOME/bin/redmi-job-started.sh"
-          test -x "$HOME/bin/redmi-job-completed.sh"
-          ln -sfn "$HOME/bin/redmi-job-started.sh" "$HOME/bin/fujitsu-job-started.sh"
-          ln -sfn "$HOME/bin/redmi-job-completed.sh" "$HOME/bin/fujitsu-job-completed.sh"
-          curl -fsS http://192.168.1.99:9860/health | grep -q 'rapsi-nas'
+          echo "VERIFY_MACHINE=$(hostname) ACTIONS_RUNNER=${RUNNER_NAME:-unknown}"
+          GH_LOCAL=(env -u GH_TOKEN -u GITHUB_TOKEN gh)
+          repos=(AppCompiler-PWA OpenWRT---AbeyyWRT SK-Gong-Kapas X7-Core-Academy XHomeNetwork XMA7 XSAHub XStay-Manager)
+
+          pass=0
+          for attempt in $(seq 1 60); do
+            total=0; online=0; legacy=0
+            out=''
+            for repo in "${repos[@]}"; do
+              j="$("${GH_LOCAL[@]}" api "repos/AbeyyN/$repo/actions/runners")"
+              rows="$(jq -r '.runners[]? | [.name,(.labels|map(.name)|join(",")),.status,.busy] | @tsv' <<<"$j")"
+              out+=$'--- '"$repo"$' ---\n'"$rows"$'\n'
+              c="$(jq '[.runners[]? | select(([.labels[]?.name]|index("redmi"))!=null)] | length' <<<"$j")"
+              o="$(jq '[.runners[]? | select((([.labels[]?.name]|index("redmi"))!=null) and .status=="online")] | length' <<<"$j")"
+              b="$(jq '[.runners[]? | select((.name|test("Fujitsu|FUJITSU|fujitsu")) or (([.labels[]?.name]|index("fujitsu"))!=null))] | length' <<<"$j")"
+              total=$((total+c)); online=$((online+o)); legacy=$((legacy+b))
+            done
+            echo "ATTEMPT=$attempt REDMI=$online/$total LEGACY=$legacy"
+            if [ "$total" -eq 10 ] && [ "$online" -eq 10 ] && [ "$legacy" -eq 0 ]; then
+              printf '%s' "$out"
+              pass=1
+              break
+            fi
+            sleep 5
+          done
+          [ "$pass" -eq 1 ]
+
+          echo '=== RASPI DASHBOARD ==='
+          health="$(curl -fsS --max-time 8 http://192.168.1.99:9860/health)"
+          state="$(curl -fsS --max-time 10 http://192.168.1.99:9860/api/state)"
+          echo "$health"
+          python3 - "$state" <<'PY'
+          import json,sys
+          d=json.loads(sys.argv[1])
+          assert d.get('source')=='redmi-build', d.get('source')
+          assert d.get('dashboard_owner')=='rapsi-nas', d.get('dashboard_owner')
+          rr=d.get('runners') or []
+          online=sum(bool(x.get('online')) for x in rr)
+          print('DASHBOARD_OWNER',d.get('dashboard_owner'))
+          print('DASHBOARD_SOURCE',d.get('source'))
+          print('DASHBOARD_RUNNERS',online,len(rr))
+          PY
+          grep -q '"owner":"rapsi-nas"' <<<"$health"
+
+          echo '=== REDMI HEADLESS SERVICES ==='
           ! ss -lnt 2>/dev/null | grep -qE ':9860\b'
-          rm -f "$HOME/redmi-final-rename-launch.log"
-          setsid -f env -u RUNNER_TRACKING_ID -u GITHUB_ACTIONS -u CI \
-            bash -lc 'sleep 15; exec /home/abeyy/bin/redmi-final-rename.sh' \
-            >>"$HOME/redmi-final-rename-launch.log" 2>&1 </dev/null
-          echo 'FINAL_RENAME_DETACHED=YES'
-          echo 'It will start after this GitHub job has exited.'
+          curl -fsS http://127.0.0.1:9862/health
+          echo
+          curl -fsS http://127.0.0.1:9861/state
+          echo
+
+          echo '=== LEGACY RUNTIME AUDIT ==='
+          ! find "$HOME/bin" -maxdepth 1 -iname 'fujitsu*' | grep -q .
+          ! test -e "$HOME/.config/fujitsu-runner"
+          ! test -e "$HOME/.local/state/fujitsu-runner"
+          ! test -e "$HOME/.local/share/fujitsu-runner"
+          ! test -e "$HOME/.local/share/fujitsu-scheduler"
+          ! test -e "$HOME/.ssh/fujitsu-build-home"
+          ! grep -RInI -E 'FUJITSU|Fujitsu|fujitsu' "$HOME/actions-runner"/*/.env "$HOME/bin/start-all-github-runners.sh" "$HOME/bin/redmi-runner-health-loop.sh" "$HOME/bin/redmi-telegram-status" "$HOME/bin/redmi-telegram-command-bot" 2>/dev/null | grep -q .
+
+          echo '=== BOOT ==='
+          crontab -l
+          crontab -l | grep -q '986-redmi-runtime'
+          crontab -l | grep -q '986-redmi-telemetry'
+          ! crontab -l | grep -qi fujitsu
+
+          echo '=== TMUX ==='
+          tmux ls 2>/dev/null || true
+          ! tmux ls 2>/dev/null | grep -qi fujitsu
+
+          echo 'FINAL_CUTOVER_VERIFIED=PASS'
