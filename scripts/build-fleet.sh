@@ -2,7 +2,8 @@
 set -euo pipefail
 ROOT="${GITHUB_WORKSPACE:-$(pwd)}"
 STATE="$ROOT/.pwa-state.tsv"
-export PATH="/home/abeyy/tools/flutter/bin:$PATH"
+[ -r /home/abeyy/bin/redmi-build-env.sh ] && . /home/abeyy/bin/redmi-build-env.sh
+export PATH="/home/abeyy/.local/bin:/home/abeyy/bin:/home/abeyy/flutter/bin:/home/abeyy/tools/flutter/bin:$PATH"
 GH_LOCAL=(env -u GH_TOKEN -u GITHUB_TOKEN gh)
 "${GH_LOCAL[@]}" auth setup-git >/dev/null
 touch "$STATE"
@@ -19,6 +20,14 @@ PY
 clone_src() { local repo="$1" branch="$2" dest="$3"; git clone --depth 1 --branch "$branch" "https://github.com/${repo}.git" "$dest"; }
 should_build() { local slug="$1" sha="$2" old; old=$(get_old "$slug"); [ "$FORCE" -eq 1 ] || [ "$old" != "$sha" ]; }
 
+with_build_lock() {
+  if command -v redmi-build-lock >/dev/null 2>&1; then
+    REDMI_BUILD_CLASS=light redmi-build-lock bash -lc "$1"
+  else
+    bash -lc "$1"
+  fi
+}
+
 build_x7() {
   local tmp sha
   sha=$(remote_sha 'AbeyyN/X7-Core-Academy' 'main')
@@ -28,7 +37,7 @@ build_x7() {
   cd "$tmp/src/apps/x7-kids-academy/unified"
   flutter create . --platforms=web --org my.abeyytechxy --project-name x7kidsacademy
   flutter pub get
-  FUJITSU_BUILD_CLASS=light fujitsu-build-lock bash -lc '
+  with_build_lock '
     set -euo pipefail
     flutter analyze
     flutter test
@@ -61,7 +70,7 @@ build_sk() {
   cd "$tmp/src"
   flutter create . --platforms=web --org my.abeyytechxy --project-name sk_gong_kapas
   flutter pub get
-  FUJITSU_BUILD_CLASS=light fujitsu-build-lock bash -lc '
+  with_build_lock '
     set -euo pipefail
     flutter analyze
     flutter test
@@ -86,7 +95,7 @@ build_xsahub() {
   python3 tool/prepare_source.py
   python3 tool/prepare_web.py
   flutter pub get
-  FUJITSU_BUILD_CLASS=light fujitsu-build-lock bash -lc '
+  with_build_lock '
     set -euo pipefail
     flutter analyze --no-fatal-infos --no-fatal-warnings
     flutter build web --release --base-href /AppCompiler-PWA/xsahub/
@@ -107,7 +116,7 @@ cat > "$ROOT/index.html" <<'HTML'
 HTML
 touch "$ROOT/.nojekyll"
 cd "$ROOT"
-git config user.name 'AbeyyTechXy Fujitsu PWA Builder'
+git config user.name 'AbeyyTechXy Redmi PWA Builder'
 git config user.email '86111714+AbeyyN@users.noreply.github.com'
 git add -A
 if ! git diff --cached --quiet; then
@@ -123,6 +132,6 @@ for path in x7 xma7 sk-gong-kapas xsahub; do
   for i in $(seq 1 18); do timeout 20s curl -fsSL "$url" -o /tmp/pwa-verify.html && break || sleep 10; done
 done
 
-if [ -x /home/abeyy/bin/fujitsu-notify-job ]; then
-  /home/abeyy/bin/fujitsu-notify-job success 'AbeyyN/AppCompiler-PWA' 'Central PWA Fleet' main "${GITHUB_RUN_ID:-manual}" || true
+if [ -x /home/abeyy/bin/redmi-notify-job ]; then
+  /home/abeyy/bin/redmi-notify-job success 'AbeyyN/AppCompiler-PWA' 'Central PWA Fleet' main "${GITHUB_RUN_ID:-manual}" || true
 fi
