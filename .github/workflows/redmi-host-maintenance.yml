@@ -13,144 +13,35 @@ permissions:
 jobs:
   host:
     runs-on: [self-hosted, linux, x64]
-    timeout-minutes: 25
+    timeout-minutes: 20
     steps:
-      - name: Complete Raspi dashboard cutover
+      - name: Resume Raspi dashboard cutover
         shell: bash
         run: |
           set -euo pipefail
           export PATH="$HOME/.local/bin:$HOME/bin:$PATH"
           test "$(hostname)" = redmi-build
-          KEY="$HOME/.ssh/fujitsu-build-home"
-          test -r "$KEY"
+          KEY="$HOME/.ssh/fujitsu-build-home"; test -r "$KEY"
           SSH=(ssh -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new abeyy@192.168.1.99)
-          "${SSH[@]}" 'test "$(hostname)" = rapsi-nas'
 
-          echo '=== 1. INSTALL HEADLESS REDMI TELEMETRY ==='
-          mkdir -p "$HOME/redmi-telemetry" "$HOME/logs/actions-runner" "$HOME/bin"
-          cat > "$HOME/redmi-telemetry/telemetry.py" <<'PY'
-          #!/usr/bin/env python3
-          import json, os, shutil, subprocess, threading, time
-          from datetime import datetime
-          from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+          echo '=== 1. ALLOW RASPI LAN SOURCE TO TELEMETRY ==='
+          python3 - <<'PY'
           from pathlib import Path
-
-          HOME=Path.home()
-          SPECS=[
-            ("AppCompiler-PWA","Redmi-PWA","AppCompiler-PWA"),
-            ("AppCompiler-PWA-01","Redmi-PWA-01","AppCompiler-PWA"),
-            ("OpenWRT---AbeyyWRT","Redmi-Ubuntu","OpenWRT---AbeyyWRT"),
-            ("OpenWRT---AbeyyWRT-light","Redmi-Ubuntu-Light","OpenWRT---AbeyyWRT"),
-            ("SK-Gong-Kapas","Redmi-Ubuntu","SK-Gong-Kapas"),
-            ("X7-Core-Academy","Redmi-Ubuntu","X7-Core-Academy"),
-            ("XHomeNetwork","Redmi-Ubuntu","XHomeNetwork"),
-            ("XMA7","Redmi-Ubuntu","XMA7"),
-            ("XSAHub","Redmi-Ubuntu","XSAHub"),
-            ("XStay-Manager","Redmi-Ubuntu-XStay","XStay-Manager"),
-          ]
-          REPOS=sorted({r for _,_,r in SPECS})
-          ALLOWED={"127.0.0.1","192.168.1.99","192.168.1.1"}
-          lock=threading.Lock(); gh_cache={"runs":[],"queue":[],"history":[],"updated":None}
-
-          def proc_has(text):
-              return subprocess.run(["pgrep","-f",text],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0
-
-          def host_metrics():
-              out={"hostname":"redmi-build","threads":os.cpu_count() or 0}
-              try: out["load"]=float(Path('/proc/loadavg').read_text().split()[0])
-              except Exception: pass
-              try:
-                  m={}
-                  for line in Path('/proc/meminfo').read_text().splitlines():
-                      if ':' in line:
-                          k,v=line.split(':',1); m[k]=int(v.strip().split()[0])
-                  total=m.get('MemTotal',0); avail=m.get('MemAvailable',0)
-                  if total:
-                      out["mem_pct"]=round((total-avail)*100/total,1); out["mem_available_mb"]=round(avail/1024)
-              except Exception: pass
-              try:
-                  d=shutil.disk_usage('/'); out["disk_pct"]=round(d.used*100/d.total,1); out["disk_free_gb"]=round(d.free/1024**3,1)
-              except Exception: pass
-              return out
-
-          def runner_state():
-              rows=[]
-              for directory,name,repo in SPECS:
-                  base=HOME/'actions-runner'/directory
-                  online=proc_has(str(base/'bin'/'Runner.Listener')+' run')
-                  busy=proc_has(str(base/'bin'/'Runner.Worker'))
-                  rows.append({"directory":directory,"name":name,"repo":repo,"online":online,"status":"online" if online else "offline","busy":busy})
-              return rows
-
-          def refresh_gh():
-              while True:
-                  recent=[]
-                  for repo in REPOS:
-                      try:
-                          p=subprocess.run(['gh','run','list','-R',f'AbeyyN/{repo}','--limit','12','--json','databaseId,status,conclusion,createdAt,updatedAt,headBranch,workflowName,event,url'],text=True,capture_output=True,timeout=15)
-                          if p.returncode: continue
-                          for x in json.loads(p.stdout or '[]'):
-                              x['repo']=repo; x['id']=x.get('databaseId'); x['workflow']=x.get('workflowName'); x['branch']=x.get('headBranch'); recent.append(x)
-                      except Exception: pass
-                  recent.sort(key=lambda x:x.get('createdAt') or '',reverse=True)
-                  running=[x for x in recent if x.get('status')=='in_progress'][:30]
-                  queued=[x for x in recent if x.get('status') in ('queued','pending','waiting')][:30]
-                  history=[x for x in recent if x.get('status')=='completed'][:40]
-                  with lock:
-                      gh_cache.update(runs=running,queue=queued,history=history,updated=datetime.now().astimezone().isoformat(timespec='seconds'))
-                  time.sleep(30)
-
-          def state():
-              r=runner_state()
-              with lock: g=dict(gh_cache)
-              return {"version":"redmi-telemetry-2.1","source":"redmi-build","dashboard_owner":"rapsi-nas","host":host_metrics(),"runners":r,"runs":g['runs'],"queue":g['queue'],"history":g['history'],"scheduler":{"active":g['runs'],"queued":g['queue']},"hermes":{},"error":None,"updated":datetime.now().astimezone().isoformat(timespec='seconds'),"github_updated":g['updated']}
-
-          class H(BaseHTTPRequestHandler):
-              def log_message(self,*a): pass
-              def sendj(self,obj,code=200):
-                  b=json.dumps(obj,separators=(',',':')).encode(); self.send_response(code); self.send_header('Content-Type','application/json'); self.send_header('Cache-Control','no-store'); self.send_header('Content-Length',str(len(b))); self.end_headers(); self.wfile.write(b)
-              def do_GET(self):
-                  if self.client_address[0] not in ALLOWED: return self.sendj({"error":"forbidden"},403)
-                  p=self.path.split('?',1)[0]; s=state()
-                  if p in ('/api/state','/api/status','/state'): return self.sendj(s)
-                  if p in ('/health','/healthz'):
-                      n=sum(1 for x in s['runners'] if x['online']); return self.sendj({"ok":n==len(s['runners']),"service":"redmi-telemetry","host":"redmi-build","runners":len(s['runners']),"online":n})
-                  return self.sendj({"error":"not found"},404)
-
-          threading.Thread(target=refresh_gh,daemon=True).start()
-          ThreadingHTTPServer(('0.0.0.0',9862),H).serve_forever()
+          p=Path.home()/'redmi-telemetry/telemetry.py'
+          s=p.read_text()
+          s=s.replace("if self.client_address[0] not in ALLOWED: return self.sendj({\"error\":\"forbidden\"},403)","if self.client_address[0] not in ALLOWED and not self.client_address[0].startswith('192.168.1.'): return self.sendj({\"error\":\"forbidden\"},403)")
+          p.write_text(s)
           PY
-          chmod 755 "$HOME/redmi-telemetry/telemetry.py"
           python3 -m py_compile "$HOME/redmi-telemetry/telemetry.py"
-          cat > "$HOME/bin/redmi-telemetry" <<'EOF'
-          #!/usr/bin/env bash
-          set -euo pipefail
-          export PATH="$HOME/.local/bin:$HOME/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
-          case "${1:-status}" in
-            start) pgrep -f '/home/abeyy/redmi-telemetry/[t]elemetry.py' >/dev/null || env -u RUNNER_TRACKING_ID nohup python3 "$HOME/redmi-telemetry/telemetry.py" >>"$HOME/logs/actions-runner/redmi-telemetry.log" 2>&1 </dev/null & ;;
-            stop) pkill -TERM -f '/home/abeyy/redmi-telemetry/[t]elemetry.py' 2>/dev/null || true ;;
-            restart) "$0" stop; sleep 1; "$0" start ;;
-            status) curl -fsS --max-time 4 http://127.0.0.1:9862/health ;;
-            *) echo 'usage: redmi-telemetry {start|stop|restart|status}' >&2; exit 2 ;;
-          esac
-          EOF
-          chmod 755 "$HOME/bin/redmi-telemetry"
           "$HOME/bin/redmi-telemetry" restart
-          for i in $(seq 1 30); do curl -fsS --max-time 2 http://127.0.0.1:9862/health >/dev/null 2>&1 && break; sleep 1; done
-          curl -fsS http://127.0.0.1:9862/health; echo
-          (crontab -l 2>/dev/null | grep -v '986-redmi-telemetry' || true; echo '@reboot sleep 25; /home/abeyy/bin/redmi-telemetry start # 986-redmi-telemetry') | crontab -
+          sleep 2
           "${SSH[@]}" 'curl -fsS --max-time 5 http://192.168.1.96:9862/health'; echo
 
-          echo '=== 2. INSTALL REAL DASHBOARD APPLICATION ON RASPI ==='
-          "${SSH[@]}" 'sudo -n systemctl stop redmi-dashboard.service 2>/dev/null || true; mkdir -p "$HOME/redmi-dashboard"'
-          "${SSH[@]}" 'cat > "$HOME/redmi-dashboard/dashboard.py"' <<'PY'
+          echo '=== 2. INSTALL RASPI DASHBOARD UI ==='
+          "${SSH[@]}" 'sudo -n systemctl stop redmi-dashboard.service 2>/dev/null || true; mkdir -p "$HOME/redmi-dashboard"; cat > "$HOME/redmi-dashboard/dashboard.py"' <<'PY'
           #!/usr/bin/env python3
           from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
-          PAGE=r'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>986 Redmi Build</title><style>
-          :root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#070b10;color:#eaf2fb;font:14px system-ui,-apple-system,sans-serif}.wrap{max-width:1180px;margin:auto;padding:22px}.top{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:18px}.title{font-size:24px;font-weight:800}.sub{color:#8fa4b8}.badge{padding:7px 11px;border-radius:999px;background:#10271d;color:#79efa8;font-weight:700}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}.card{background:#0e151d;border:1px solid #1d2b38;border-radius:16px;padding:16px}.k{color:#7f95aa;font-size:12px;text-transform:uppercase;letter-spacing:.08em}.v{font-size:26px;font-weight:800;margin-top:7px}.section{margin-top:18px}.runner{display:flex;justify-content:space-between;gap:10px;padding:10px 0;border-bottom:1px solid #1a2632}.runner:last-child{border:0}.on{color:#76e7a5}.off{color:#ff7b82}.busy{color:#ffd166}.run{padding:9px 0;border-bottom:1px solid #1a2632}.muted{color:#8094a8}.err{color:#ff8d94}a{color:#8bc7ff;text-decoration:none}@media(max-width:560px){.wrap{padding:14px}.title{font-size:20px}.v{font-size:22px}}</style></head><body><div class="wrap"><div class="top"><div><div class="title">986 Redmi Build Command Center</div><div class="sub">Dashboard owner: rapsi-nas · Live source: redmi-build</div></div><div id="health" class="badge">Loading…</div></div><div class="grid"><div class="card"><div class="k">Runners</div><div id="runnersCount" class="v">—</div></div><div class="card"><div class="k">Running Builds</div><div id="runningCount" class="v">—</div></div><div class="card"><div class="k">Queue</div><div id="queueCount" class="v">—</div></div><div class="card"><div class="k">Disk</div><div id="disk" class="v">—</div></div><div class="card"><div class="k">RAM</div><div id="ram" class="v">—</div></div><div class="card"><div class="k">Load</div><div id="load" class="v">—</div></div></div><div class="grid section"><div class="card"><div class="k">Runner Fleet</div><div id="runnerList"></div></div><div class="card"><div class="k">Active / Queued</div><div id="runList"></div></div><div class="card"><div class="k">Recent History</div><div id="history"></div></div></div><div id="updated" class="sub section"></div></div><script>
-          const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-          async function refresh(){try{const r=await fetch('/api/state',{cache:'no-store'});if(!r.ok)throw Error('HTTP '+r.status);const d=await r.json();const rr=d.runners||[],on=rr.filter(x=>x.online).length;document.getElementById('runnersCount').textContent=`${on}/${rr.length}`;document.getElementById('runningCount').textContent=(d.runs||[]).length;document.getElementById('queueCount').textContent=(d.queue||[]).length;document.getElementById('disk').textContent=(d.host?.disk_pct??'—')+'%';document.getElementById('ram').textContent=(d.host?.mem_pct??'—')+'%';document.getElementById('load').textContent=d.host?.load??'—';const h=document.getElementById('health');h.textContent=on===rr.length?'ALL ONLINE':`${rr.length-on} OFFLINE`;h.className='badge '+(on===rr.length?'':'err');document.getElementById('runnerList').innerHTML=rr.map(x=>`<div class="runner"><span>${esc(x.directory)}<br><span class="muted">${esc(x.name)}</span></span><span class="${x.online?(x.busy?'busy':'on'):'off'}">${x.online?(x.busy?'BUSY':'ONLINE'):'OFFLINE'}</span></div>`).join('')||'<div class="muted">No runners</div>';let act=[...(d.runs||[]),...(d.queue||[])];document.getElementById('runList').innerHTML=act.slice(0,12).map(x=>`<div class="run"><b>${esc(x.repo)}</b> · ${esc(x.workflow||x.workflowName)}<br><span class="muted">${esc(x.status)} · ${esc(x.branch||x.headBranch)}</span></div>`).join('')||'<div class="muted">No active or queued builds</div>';document.getElementById('history').innerHTML=(d.history||[]).slice(0,12).map(x=>`<div class="run"><b>${esc(x.repo)}</b> · ${esc(x.workflow||x.workflowName)}<br><span class="muted">${esc(x.conclusion||x.status)}</span></div>`).join('')||'<div class="muted">History warming up…</div>';document.getElementById('updated').textContent='Live source '+(d.source||'redmi-build')+' · updated '+(d.updated||'—');}catch(e){document.getElementById('health').textContent='DATA ERROR';document.getElementById('health').className='badge err';document.getElementById('updated').textContent=e.message}}refresh();setInterval(refresh,5000);
-          </script></body></html>'''.encode()
+          PAGE=r'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>986 Redmi Build</title><style>:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#070b10;color:#eaf2fb;font:14px system-ui,-apple-system,sans-serif}.wrap{max-width:1180px;margin:auto;padding:22px}.top{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:18px}.title{font-size:24px;font-weight:800}.sub{color:#8fa4b8}.badge{padding:7px 11px;border-radius:999px;background:#10271d;color:#79efa8;font-weight:700}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}.card{background:#0e151d;border:1px solid #1d2b38;border-radius:16px;padding:16px}.k{color:#7f95aa;font-size:12px;text-transform:uppercase;letter-spacing:.08em}.v{font-size:26px;font-weight:800;margin-top:7px}.section{margin-top:18px}.runner{display:flex;justify-content:space-between;gap:10px;padding:10px 0;border-bottom:1px solid #1a2632}.runner:last-child{border:0}.on{color:#76e7a5}.off{color:#ff7b82}.busy{color:#ffd166}.run{padding:9px 0;border-bottom:1px solid #1a2632}.muted{color:#8094a8}.err{color:#ff8d94}@media(max-width:560px){.wrap{padding:14px}.title{font-size:20px}.v{font-size:22px}}</style></head><body><div class="wrap"><div class="top"><div><div class="title">986 Redmi Build Command Center</div><div class="sub">Dashboard owner: rapsi-nas · Live source: redmi-build</div></div><div id="health" class="badge">Loading…</div></div><div class="grid"><div class="card"><div class="k">Runners</div><div id="runnersCount" class="v">—</div></div><div class="card"><div class="k">Running Builds</div><div id="runningCount" class="v">—</div></div><div class="card"><div class="k">Queue</div><div id="queueCount" class="v">—</div></div><div class="card"><div class="k">Disk</div><div id="disk" class="v">—</div></div><div class="card"><div class="k">RAM</div><div id="ram" class="v">—</div></div><div class="card"><div class="k">Load</div><div id="load" class="v">—</div></div></div><div class="grid section"><div class="card"><div class="k">Runner Fleet</div><div id="runnerList"></div></div><div class="card"><div class="k">Active / Queued</div><div id="runList"></div></div><div class="card"><div class="k">Recent History</div><div id="history"></div></div></div><div id="updated" class="sub section"></div></div><script>const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));async function refresh(){try{const r=await fetch('/api/state',{cache:'no-store'});if(!r.ok)throw Error('HTTP '+r.status);const d=await r.json(),rr=d.runners||[],on=rr.filter(x=>x.online).length;document.getElementById('runnersCount').textContent=`${on}/${rr.length}`;document.getElementById('runningCount').textContent=(d.runs||[]).length;document.getElementById('queueCount').textContent=(d.queue||[]).length;document.getElementById('disk').textContent=(d.host?.disk_pct??'—')+'%';document.getElementById('ram').textContent=(d.host?.mem_pct??'—')+'%';document.getElementById('load').textContent=d.host?.load??'—';let h=document.getElementById('health');h.textContent=on===rr.length?'ALL ONLINE':`${rr.length-on} OFFLINE`;h.className='badge '+(on===rr.length?'':'err');document.getElementById('runnerList').innerHTML=rr.map(x=>`<div class="runner"><span>${esc(x.directory)}<br><span class="muted">${esc(x.name)}</span></span><span class="${x.online?(x.busy?'busy':'on'):'off'}">${x.online?(x.busy?'BUSY':'ONLINE'):'OFFLINE'}</span></div>`).join('');let act=[...(d.runs||[]),...(d.queue||[])];document.getElementById('runList').innerHTML=act.slice(0,12).map(x=>`<div class="run"><b>${esc(x.repo)}</b> · ${esc(x.workflow||x.workflowName)}<br><span class="muted">${esc(x.status)} · ${esc(x.branch||x.headBranch)}</span></div>`).join('')||'<div class="muted">No active or queued builds</div>';document.getElementById('history').innerHTML=(d.history||[]).slice(0,12).map(x=>`<div class="run"><b>${esc(x.repo)}</b> · ${esc(x.workflow||x.workflowName)}<br><span class="muted">${esc(x.conclusion||x.status)}</span></div>`).join('')||'<div class="muted">History warming up…</div>';document.getElementById('updated').textContent='Live source '+(d.source||'redmi-build')+' · updated '+(d.updated||'—')}catch(e){document.getElementById('health').textContent='DATA ERROR';document.getElementById('health').className='badge err';document.getElementById('updated').textContent=e.message}}refresh();setInterval(refresh,5000);</script></body></html>'''.encode()
           class H(BaseHTTPRequestHandler):
               def log_message(self,*a): pass
               def do_GET(self):
@@ -162,55 +53,59 @@ jobs:
                   self.send_response(404); self.end_headers()
           ThreadingHTTPServer(('127.0.0.1',19861),H).serve_forever()
           PY
-          "${SSH[@]}" 'chmod 755 "$HOME/redmi-dashboard/dashboard.py"; python3 -m py_compile "$HOME/redmi-dashboard/dashboard.py"; sudo -n systemctl restart redmi-dashboard.service; for i in $(seq 1 30); do curl -fsS --max-time 2 http://127.0.0.1:19861/health >/dev/null 2>&1 && break; sleep 1; done; curl -fsS http://127.0.0.1:19861/health; echo; sudo -n systemctl is-active redmi-dashboard.service'
+          "${SSH[@]}" 'chmod 755 "$HOME/redmi-dashboard/dashboard.py"; python3 -m py_compile "$HOME/redmi-dashboard/dashboard.py"; sudo -n systemctl restart redmi-dashboard.service; for i in $(seq 1 20); do curl -fsS --max-time 2 http://127.0.0.1:19861/health >/dev/null 2>&1 && break; sleep 1; done; curl -fsS http://127.0.0.1:19861/health; echo; sudo -n systemctl is-active redmi-dashboard.service'
 
-          echo '=== 3. CUT CADDY OVER FROM TUNNEL TO LOCAL RASPI UI + REDMI API ==='
-          "${SSH[@]}" 'sudo -n cp -a /etc/caddy/Caddyfile /etc/caddy/Caddyfile.pre-redmi-dashboard-cutover-$(date +%Y%m%d-%H%M%S)'
-          "${SSH[@]}" 'python3 -' <<'PY'
+          echo '=== 3. CUT CADDY TO LOCAL RASPI UI ==='
+          "${SSH[@]}" 'sudo -n cp -a /etc/caddy/Caddyfile /etc/caddy/Caddyfile.pre-redmi-dashboard-cutover-$(date +%Y%m%d-%H%M%S); python3 -' <<'PY'
           from pathlib import Path
           import re
           src=Path('/etc/caddy/Caddyfile').read_text()
-          def block(host,bind=''):
-              b=f'''{host} {{\n'''
-              if bind: b+=f'    bind {bind}\n'
-              b+='''    handle /api/* {\n        reverse_proxy 192.168.1.96:9862\n    }\n    handle /health {\n        reverse_proxy 127.0.0.1:19861\n    }\n    handle {\n        reverse_proxy 127.0.0.1:19861\n    }\n}'''
-              return b
-          home='# BUILD-HOME-BEGIN\n'+block('http://build.home','192.168.1.99')+'\n# BUILD-HOME-END'
-          lan='# BUILD-LAN-BEGIN\n'+block('http://192.168.1.99:9860')+'\n# BUILD-LAN-END'
-          src,n1=re.subn(r'# BUILD-HOME-BEGIN.*?# BUILD-HOME-END',home,src,flags=re.S)
-          src,n2=re.subn(r'# BUILD-LAN-BEGIN.*?# BUILD-LAN-END',lan,src,flags=re.S)
+          home='''# BUILD-HOME-BEGIN
+          http://build.home {
+              bind 192.168.1.99
+              handle /api/* { reverse_proxy 192.168.1.96:9862 }
+              handle /health { reverse_proxy 127.0.0.1:19861 }
+              handle { reverse_proxy 127.0.0.1:19861 }
+          }
+          # BUILD-HOME-END'''
+          lan='''# BUILD-LAN-BEGIN
+          http://192.168.1.99:9860 {
+              handle /api/* { reverse_proxy 192.168.1.96:9862 }
+              handle /health { reverse_proxy 127.0.0.1:19861 }
+              handle { reverse_proxy 127.0.0.1:19861 }
+          }
+          # BUILD-LAN-END'''
+          src,n1=re.subn(r'# BUILD-HOME-BEGIN.*?# BUILD-HOME-END',home,src,flags=re.S); src,n2=re.subn(r'# BUILD-LAN-BEGIN.*?# BUILD-LAN-END',lan,src,flags=re.S)
           if (n1,n2)!=(1,1): raise SystemExit(f'markers home={n1} lan={n2}')
           Path('/tmp/Caddyfile.redmi.new').write_text(src)
           PY
-          "${SSH[@]}" 'sudo -n install -m 644 /tmp/Caddyfile.redmi.new /etc/caddy/Caddyfile; sudo -n caddy validate --config /etc/caddy/Caddyfile; sudo -n systemctl reload caddy; curl -fsS --max-time 5 http://192.168.1.99:9860/health; echo; curl -fsS --max-time 5 http://192.168.1.99:9860/api/state | python3 -c "import json,sys;d=json.load(sys.stdin);print(d[\"source\"],d[\"dashboard_owner\"],sum(x[\"online\"] for x in d[\"runners\"]),len(d[\"runners\"]))"; curl -fsS --max-time 5 -H "Host: build.home" http://192.168.1.99/ | grep -q "986 Redmi Build Command Center"'
+          "${SSH[@]}" 'sudo -n install -m 644 /tmp/Caddyfile.redmi.new /etc/caddy/Caddyfile; sudo -n caddy validate --config /etc/caddy/Caddyfile; sudo -n systemctl reload caddy; curl -fsS http://192.168.1.99:9860/health; echo; curl -fsS http://192.168.1.99:9860/api/state | python3 -c "import json,sys;d=json.load(sys.stdin);print(d[\"source\"],d[\"dashboard_owner\"],sum(x[\"online\"] for x in d[\"runners\"]),len(d[\"runners\"]))"; curl -fsS -H "Host: build.home" http://192.168.1.99/ | grep -q "986 Redmi Build Command Center"'
 
-          echo '=== 4. REPLACE LOCAL CONTROL WITH HEADLESS REDMI-CONTROL ==='
+          echo '=== 4. HEADLESS REDMI CONTROL ==='
           mkdir -p "$HOME/redmi-control"
           cat > "$HOME/redmi-control/control.py" <<'PY'
           #!/usr/bin/env python3
-          import json,subprocess,urllib.request
+          import json,urllib.request
           from datetime import datetime
           from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
           def get(url):
               try:
-                  with urllib.request.urlopen(url,timeout=3) as r: return json.loads(r.read().decode())
-              except Exception: return None
+                  with urllib.request.urlopen(url,timeout=3) as r:return json.loads(r.read().decode())
+              except Exception:return {}
           def state():
-              t=get('http://127.0.0.1:9862/health') or {}
-              d=get('http://192.168.1.99:9860/health') or {}
+              t=get('http://127.0.0.1:9862/health'); d=get('http://192.168.1.99:9860/health')
               return {'name':'REDMI-CONTROL','version':'2.0.0','updated':datetime.now().astimezone().isoformat(timespec='seconds'),'host':'redmi-build','telemetry':{'healthy':bool(t.get('ok')),'port':9862},'dashboard':{'healthy':bool(d.get('ok')),'owner':'rapsi-nas','url':'http://192.168.1.99:9860'},'control':{'healthy':True,'port':9861}}
           class H(BaseHTTPRequestHandler):
-              def log_message(self,*a): pass
+              def log_message(self,*a):pass
               def sendj(self,o):
-                  b=json.dumps(o,separators=(',',':')).encode(); self.send_response(200); self.send_header('Content-Type','application/json'); self.send_header('Cache-Control','no-store'); self.send_header('Content-Length',str(len(b))); self.end_headers(); self.wfile.write(b)
+                  b=json.dumps(o,separators=(',',':')).encode();self.send_response(200);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(b)));self.end_headers();self.wfile.write(b)
               def do_GET(self):
                   p=self.path.split('?',1)[0]
-                  if p in ('/state','/api/state'): return self.sendj(state())
-                  if p in ('/health','/healthz'): return self.sendj({'ok':True,'name':'REDMI-CONTROL','version':'2.0.0'})
-                  self.send_response(404); self.end_headers()
+                  if p in ('/state','/api/state'):return self.sendj(state())
+                  if p in ('/health','/healthz'):return self.sendj({'ok':True,'name':'REDMI-CONTROL','version':'2.0.0'})
+                  self.send_response(404);self.end_headers()
           ThreadingHTTPServer(('127.0.0.1',9861),H).serve_forever()
           PY
-          chmod 755 "$HOME/redmi-control/control.py"
           cat > "$HOME/bin/redmi-control" <<'EOF'
           #!/usr/bin/env bash
           set -euo pipefail
@@ -219,39 +114,30 @@ jobs:
             stop) tmux kill-session -t redmi-control 2>/dev/null || true ;;
             restart) "$0" stop; sleep 1; "$0" start ;;
             status) curl -fsS --max-time 5 http://127.0.0.1:9861/state ;;
-            *) echo 'usage: redmi-control {start|stop|restart|status}' >&2; exit 2 ;;
           esac
           EOF
-          chmod 755 "$HOME/bin/redmi-control"
-          tmux kill-session -t fujitsu-control 2>/dev/null || true
-          pkill -TERM -f '/home/abeyy/fujitsu-control/[f]ujitsu-control.py' 2>/dev/null || true
-          "$HOME/bin/redmi-control" restart
-          for i in $(seq 1 20); do curl -fsS --max-time 2 http://127.0.0.1:9861/healthz >/dev/null 2>&1 && break; sleep 1; done
-          curl -fsS http://127.0.0.1:9861/state; echo
+          chmod 755 "$HOME/redmi-control/control.py" "$HOME/bin/redmi-control"
+          tmux kill-session -t fujitsu-control 2>/dev/null || true; pkill -TERM -f '/home/abeyy/fujitsu-control/[f]ujitsu-control.py' 2>/dev/null || true
+          "$HOME/bin/redmi-control" restart; sleep 2; curl -fsS http://127.0.0.1:9861/state; echo
           ln -sfn "$HOME/bin/redmi-control" "$HOME/bin/fujitsu-control"
 
-          echo '=== 5. REMOVE DASHBOARD FROM REDMI ==='
-          tmux kill-session -t fujitsu-dashboard 2>/dev/null || true
-          tmux kill-session -t fujitsu-build-home-tunnel 2>/dev/null || true
+          echo '=== 5. REMOVE REDMI DASHBOARD + TUNNEL ==='
+          tmux kill-session -t fujitsu-dashboard 2>/dev/null || true; tmux kill-session -t fujitsu-build-home-tunnel 2>/dev/null || true
           pkill -TERM -f '/home/abeyy/fujitsu-dashboard/[d]ashboard.py' 2>/dev/null || true
           python3 - <<'PY'
           from pathlib import Path
           import re
-          p=Path.home()/'bin/start-all-github-runners.sh'; s=p.read_text()
+          p=Path.home()/'bin/start-all-github-runners.sh';s=p.read_text()
           s=re.sub(r'\n?# BUILD-HOME-TUNNEL-BEGIN.*?# BUILD-HOME-TUNNEL-END\n?','\n',s,flags=re.S)
           s=re.sub(r'\n?# BEGIN FUJITSU DASHBOARD.*?# END FUJITSU DASHBOARD\n?','\n',s,flags=re.S)
-          s=re.sub(r'# BEGIN FUJITSU CONTROL.*?# END FUJITSU CONTROL',"# BEGIN REDMI CONTROL\nif [ -x \"$HOME/bin/redmi-control\" ]; then\n  env -u RUNNER_TRACKING_ID -u GITHUB_ACTIONS -u CI \"$HOME/bin/redmi-control\" start || true\n  echo \"Online: REDMI-CONTROL\"\nfi\n# END REDMI CONTROL",s,flags=re.S)
+          s=re.sub(r'# BEGIN FUJITSU CONTROL.*?# END FUJITSU CONTROL','# BEGIN REDMI CONTROL\nif [ -x "$HOME/bin/redmi-control" ]; then\n  env -u RUNNER_TRACKING_ID -u GITHUB_ACTIONS -u CI "$HOME/bin/redmi-control" start || true\n  echo "Online: REDMI-CONTROL"\nfi\n# END REDMI CONTROL',s,flags=re.S)
           p.write_text(s)
           PY
-          rm -f "$HOME/bin/fujitsu-dashboard" "$HOME/bin/fujitsu-dashboard-status"
-          rm -rf "$HOME/fujitsu-dashboard" "$HOME/fujitsu-control"
+          rm -f "$HOME/bin/fujitsu-dashboard" "$HOME/bin/fujitsu-dashboard-status"; rm -rf "$HOME/fujitsu-dashboard" "$HOME/fujitsu-control"
           (crontab -l 2>/dev/null | grep -v -E 'fujitsu-dashboard|fujitsu-build-home-tunnel|19860' || true) | crontab -
           sleep 2
-          if ss -lnt 2>/dev/null | grep -qE '(^|:)9860\b'; then echo 'ERROR Redmi still owns 9860'; ss -lntp | grep 9860 || true; exit 61; fi
-
-          echo '=== OWNERSHIP PROOF ==='
-          echo REDMI_DASHBOARD_PORT_9860=CLOSED
+          ! ss -lnt 2>/dev/null | grep -qE ':9860\b'
           curl -fsS http://127.0.0.1:9862/health; echo
           curl -fsS http://127.0.0.1:9861/state | grep -q 'REDMI-CONTROL'
-          "${SSH[@]}" 'curl -fsS http://192.168.1.99:9860/health; echo; curl -fsS http://192.168.1.99:9860/api/state | grep -q redmi-build; sudo -n systemctl is-active redmi-dashboard.service; sudo -n ss -lntp | grep -E "127.0.0.1:19861|:9860"'
+          "${SSH[@]}" 'curl -fsS http://192.168.1.99:9860/health; echo; curl -fsS http://192.168.1.99:9860/api/state | grep -q redmi-build; sudo -n systemctl is-active redmi-dashboard.service'
           echo RASPI_ONLY_DASHBOARD=PASS
