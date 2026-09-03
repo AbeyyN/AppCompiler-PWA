@@ -1,0 +1,28 @@
+name: Redmi Fleet GitHub Audit
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/redmi-fleet-github-audit.yml'
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Query all Redmi registrations from GitHub
+        shell: bash
+        run: |
+          set -euo pipefail
+          for repo in AppCompiler-PWA OpenWRT---AbeyyWRT SK-Gong-Kapas X7-Core-Academy XHomeNetwork XMA7 XSAHub XStay-Manager; do
+            echo "=== $repo ==="
+            gh api "repos/AbeyyN/$repo/actions/runners" --jq '.runners[]? | [.id,.name,.status,.busy,([.labels[].name]|join(","))] | @tsv' || true
+          done
