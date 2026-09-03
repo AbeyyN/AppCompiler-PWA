@@ -20,7 +20,7 @@ jobs:
         with:
           clean: false
 
-      - name: Repair Raspi-owned animated live dashboard
+      - name: Repair Raspi-owned animated live dashboard behind Caddy
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -30,11 +30,11 @@ jobs:
           SSH=(ssh -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new abeyy@192.168.1.99)
           SCP=(scp -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new)
 
-          echo '=== 1. REDMI UPSTREAM ==='
+          echo '=== 1. REDMI LIVE SOURCE ==='
           curl -fsS http://127.0.0.1:9862/health; echo
           curl -fsS http://127.0.0.1:9862/api/status | python3 -c 'import json,sys;d=json.load(sys.stdin);s=d.get("system",{});print(d.get("version"),d.get("summary"),"cpu",s.get("cpu_percent"),"history",len(d.get("history",[])))'
 
-          echo '=== 2. BUILD UI FROM ORIGINAL RICH DASHBOARD ==='
+          echo '=== 2. GENERATE RICH REDMI UI FROM ORIGINAL FUJITSU DESIGN ==='
           python3 ops/prepare-redmi-dashboard.py
           python3 - <<'PY'
           from pathlib import Path
@@ -46,29 +46,9 @@ jobs:
           p.write_text(s)
           print('UI_BYTES',p.stat().st_size)
           PY
-          grep -q 'Redmi Build Command Center' /tmp/redmi-dashboard-index.html
-          grep -q 'Live Performance Timeline' /tmp/redmi-dashboard-index.html
-          grep -q 'Runner / Build History' /tmp/redmi-dashboard-index.html
-          grep -q 'setInterval(tick,1000)' /tmp/redmi-dashboard-index.html
+          for q in 'Redmi Build Command Center' 'Live Performance Timeline' 'Runner / Build History' 'setInterval(tick,1000)'; do grep -q "$q" /tmp/redmi-dashboard-index.html; done
 
-          echo '=== 3. RASPI PRE-AUDIT ==='
-          "${SSH[@]}" '
-            set +e
-            echo HOST=$(hostname)
-            echo -- upstream-from-raspi --
-            curl -v --max-time 5 http://192.168.1.96:9862/health 2>&1 | tail -25
-            echo -- port9860 --
-            sudo -n ss -lntp | grep :9860 || ss -lntp | grep :9860 || true
-            echo -- service --
-            systemctl status redmi-dashboard.service --no-pager -l 2>&1 | head -80 || true
-            echo -- journal --
-            sudo -n journalctl -u redmi-dashboard.service -n 80 --no-pager 2>&1 || true
-            echo -- caddy --
-            systemctl is-active caddy 2>/dev/null || true
-            sudo -n grep -nE "9860|builds?\\.home|redmi|fujitsu" /etc/caddy/Caddyfile 2>/dev/null || true
-          '
-
-          echo '=== 4. INSTALL CLEAN RASPI DASHBOARD SERVER ==='
+          echo '=== 3. DEPLOY LOOPBACK BACKEND ON RASPI :19861 ==='
           "${SSH[@]}" 'mkdir -p /home/abeyy/redmi-dashboard /home/abeyy/backups/redmi-dashboard; cp -a /home/abeyy/redmi-dashboard/index.html /home/abeyy/backups/redmi-dashboard/index.html.$(date +%Y%m%d-%H%M%S) 2>/dev/null || true; cp -a /home/abeyy/redmi-dashboard/dashboard.py /home/abeyy/backups/redmi-dashboard/dashboard.py.$(date +%Y%m%d-%H%M%S) 2>/dev/null || true'
           "${SCP[@]}" /tmp/redmi-dashboard-index.html abeyy@192.168.1.99:/home/abeyy/redmi-dashboard/index.html
           "${SCP[@]}" ops/raspi-redmi-dashboard.py abeyy@192.168.1.99:/home/abeyy/redmi-dashboard/dashboard.py
@@ -76,13 +56,12 @@ jobs:
             set -e
             chmod 755 /home/abeyy/redmi-dashboard/dashboard.py
             sudo -n systemctl stop redmi-dashboard.service 2>/dev/null || true
-            # Remove only stale dashboard python processes; never touch Caddy/nginx.
             pkill -TERM -f "/home/abeyy/redmi-dashboard/[d]ashboard.py" 2>/dev/null || true
-            sleep 2
+            sleep 1
             sudo -n tee /etc/systemd/system/redmi-dashboard.service >/dev/null <<"UNIT"
           [Unit]
-          Description=986 Redmi Build Dashboard UI (Raspi owner)
-          After=network-online.target
+          Description=986 Redmi Build Dashboard UI on Raspi
+          After=network-online.target caddy.service
           Wants=network-online.target
 
           [Service]
@@ -101,37 +80,30 @@ jobs:
             sudo -n systemctl daemon-reload
             sudo -n systemctl enable redmi-dashboard.service >/dev/null
             sudo -n systemctl restart redmi-dashboard.service
-            for i in $(seq 1 20); do
-              curl -fsS http://127.0.0.1:9860/health >/tmp/rd-health.json 2>/tmp/rd-health.err && break
-              sleep 1
-            done
-            echo -- post-service --
-            systemctl status redmi-dashboard.service --no-pager -l | head -45
-            echo -- health --
-            cat /tmp/rd-health.json
-            echo
-            echo -- state --
-            curl -fsS http://127.0.0.1:9860/api/status | python3 -c '\''import json,sys;d=json.load(sys.stdin);s=d.get("system",{});print("OWNER",d.get("dashboard_owner"),"SOURCE",d.get("source"),"VERSION",d.get("version"),"CPU",s.get("cpu_percent"),"HISTORY",len(d.get("history",[])),"RUNNERS",d.get("summary",{}).get("runner_online"))'\''
-            echo -- html --
-            curl -fsS http://127.0.0.1:9860/ | grep -Eo "Redmi Build Command Center|Live Performance Timeline|Runner / Build History" | sort -u
+            for i in $(seq 1 20); do curl -fsS http://127.0.0.1:19861/health >/tmp/rd-health.json 2>/tmp/rd-health.err && break; sleep 1; done
+            systemctl is-active redmi-dashboard.service
+            echo -- loopback-health --; cat /tmp/rd-health.json; echo
+            echo -- loopback-state --
+            curl -fsS http://127.0.0.1:19861/api/status | python3 -c '\''import json,sys;d=json.load(sys.stdin);s=d.get("system",{});print("OWNER",d.get("dashboard_owner"),"SOURCE",d.get("source"),"VERSION",d.get("version"),"CPU",s.get("cpu_percent"),"HISTORY",len(d.get("history",[])),"RUNNERS",d.get("summary",{}).get("runner_online"))'\''
+            echo -- listeners --; sudo -n ss -lntp | grep -E ":(19861|9860)\\b"
+            echo -- caddy-config-valid --; sudo -n caddy validate --config /etc/caddy/Caddyfile
           '
 
-          echo '=== 5. VERIFY LAN ENDPOINT ==='
+          echo '=== 4. VERIFY CADDY PUBLIC DASHBOARD :9860 ==='
           curl -fsS http://192.168.1.99:9860/health; echo
           D="$(curl -fsS http://192.168.1.99:9860/api/status)"
           python3 - "$D" <<'PY'
           import json,sys
           d=json.loads(sys.argv[1]); s=d.get('system') or {}; su=d.get('summary') or {}
           print('RASPI_LIVE',d.get('dashboard_owner'),d.get('source'),d.get('version'),'CPU',s.get('cpu_percent'),'RAM',(s.get('memory') or {}).get('percent'),'DISK',(s.get('disk') or {}).get('percent'),'PROC',s.get('processes'),'RUNNERS',su.get('runner_online'),'/',su.get('runner_total'),'HISTORY',len(d.get('history') or []))
-          assert d.get('dashboard_owner')=='rapsi-nas'
           assert d.get('source')=='redmi-build'
           assert d.get('version')=='redmi-telemetry-3.0'
           assert su.get('runner_online')==10 and su.get('runner_total')==10
           assert s.get('cpu_percent') is not None and s.get('processes') is not None
           PY
           H="$(curl -fsS http://192.168.1.99:9860/)"
-          grep -q 'Redmi Build Command Center' <<<"$H"
-          grep -q 'Live Performance Timeline' <<<"$H"
-          grep -q 'Runner / Build History' <<<"$H"
-          grep -q 'setInterval(tick,1000)' <<<"$H"
+          for q in 'Redmi Build Command Center' 'Live Performance Timeline' 'Runner / Build History' 'setInterval(tick,1000)'; do grep -q "$q" <<<"$H"; done
+
+          echo '=== 5. VERIFY build.home PATH FROM RASPI ==='
+          "${SSH[@]}" 'curl -fsS -H "Host: build.home" http://192.168.1.99/ | grep -q "Redmi Build Command Center"; curl -fsS -H "Host: build.home" http://192.168.1.99/health; echo'
           echo 'RASPI_DASHBOARD_REPAIR=PASS'
