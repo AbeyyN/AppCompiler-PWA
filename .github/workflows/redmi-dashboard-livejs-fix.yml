@@ -1,0 +1,91 @@
+name: Redmi Dashboard Live JS Fix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/redmi-dashboard-livejs-fix.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  patch:
+    runs-on: [self-hosted, linux, x64, redmi]
+    timeout-minutes: 10
+    steps:
+      - name: Checkout dashboard source
+        uses: actions/checkout@v5
+        with:
+          clean: false
+
+      - name: Patch only Raspi dashboard HTML and verify live JS
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          export HOME=/home/abeyy
+          KEY="$HOME/.ssh/redmi-build-home"
+          test -r "$KEY"
+          SSH=(ssh -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new abeyy@192.168.1.99)
+          SCP=(scp -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new)
+
+          echo '=== LIVE API BEFORE PATCH ==='
+          curl -fsS http://192.168.1.99:9860/api/state | python3 -c 'import json,sys;d=json.load(sys.stdin);s=d.get("summary",{});print("API",d.get("version"),d.get("source"),"RUNNERS",s.get("runner_online"),"/",s.get("runner_total"),"HISTORY",len(d.get("history") or []))'
+
+          echo '=== GENERATE HTML ==='
+          python3 ops/prepare-redmi-dashboard.py
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/redmi-dashboard-index.html')
+          s=p.read_text()
+          old="let bar=document.createElement('div');bar.className='progressbar';bar.innerHTML=`<i style=\"width:${p}%\"></i>`;el.firstElementChild?.appendChild(bar)"
+          new="let bar=el.querySelector('.progressbar');if(!bar){bar=document.createElement('div');bar.className='progressbar';el.firstElementChild?.appendChild(bar)}bar.innerHTML=`<i style=\"width:${p}%\"></i>`"
+          s=s.replace(old,new)
+          p.write_text(s)
+          print('UI_BYTES',p.stat().st_size)
+          assert '\\nconst perfHist' not in s, 'literal backslash-n still present before perfHist'
+          assert 'const perfHist=' in s
+          assert "fetch('/api/state'" in s
+          assert 'setInterval(tick,1000)' in s
+          PY
+
+          echo '=== JAVASCRIPT SYNTAX CHECK ==='
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          s=Path('/tmp/redmi-dashboard-index.html').read_text()
+          blocks=re.findall(r'<script(?:\s[^>]*)?>(.*?)</script>',s,re.S|re.I)
+          if not blocks:
+              raise SystemExit('no script blocks found')
+          Path('/tmp/redmi-dashboard.js').write_text('\n'.join(blocks))
+          print('SCRIPT_BLOCKS',len(blocks),'JS_BYTES',Path('/tmp/redmi-dashboard.js').stat().st_size)
+          PY
+          node --check /tmp/redmi-dashboard.js
+
+          echo '=== DEPLOY HTML ONLY ==='
+          "${SSH[@]}" 'set -e; mkdir -p /home/abeyy/backups/redmi-dashboard; cp -a /home/abeyy/redmi-dashboard/index.html /home/abeyy/backups/redmi-dashboard/index.html.livejs-$(date +%Y%m%d-%H%M%S)'
+          "${SCP[@]}" /tmp/redmi-dashboard-index.html abeyy@192.168.1.99:/home/abeyy/redmi-dashboard/index.html
+          LOCAL_SHA=$(sha256sum /tmp/redmi-dashboard-index.html | awk '{print $1}')
+          REMOTE_SHA=$("${SSH[@]}" "sha256sum /home/abeyy/redmi-dashboard/index.html | awk '{print \\$1}'")
+          echo "LOCAL_SHA=$LOCAL_SHA"
+          echo "REMOTE_SHA=$REMOTE_SHA"
+          test "$LOCAL_SHA" = "$REMOTE_SHA"
+
+          echo '=== PUBLIC VERIFY ==='
+          H=/tmp/public-dashboard.html
+          curl -fsS http://192.168.1.99:9860/ -o "$H"
+          grep -q 'Redmi Build Command Center' "$H"
+          grep -q 'const perfHist=' "$H"
+          grep -q 'setInterval(tick,1000)' "$H"
+          ! grep -Fq '\\nconst perfHist' "$H"
+          D="$(curl -fsS http://192.168.1.99:9860/api/state)"
+          python3 - "$D" <<'PY'
+          import json,sys
+          d=json.loads(sys.argv[1]); s=d.get('summary') or {}; sy=d.get('system') or {}
+          print('LIVE',d.get('dashboard_owner'),d.get('source'),d.get('version'),'RUNNERS',s.get('runner_online'),'/',s.get('runner_total'),'CPU',sy.get('cpu_percent'),'RAM',(sy.get('memory') or {}).get('percent'),'HISTORY',len(d.get('history') or []))
+          assert d.get('dashboard_owner')=='rapsi-nas'
+          assert d.get('source')=='redmi-build'
+          assert s.get('runner_online')==10 and s.get('runner_total')==10
+          PY
+          echo REDMI_DASHBOARD_LIVEJS_FIX=PASS
