@@ -1,4 +1,4 @@
-name: Redmi Host Verification
+name: Redmi Staged Runner Rename
 
 on:
   push:
@@ -11,85 +11,174 @@ permissions:
   contents: read
 
 jobs:
-  verify:
+  migrate:
     runs-on: [self-hosted, linux, x64]
-    timeout-minutes: 8
+    timeout-minutes: 15
     steps:
-      - name: Verify Redmi fleet and Raspi-only dashboard
+      - name: Rename nine idle runners and hand off current runner
         shell: bash
         run: |
-          set -euo pipefail
+          set -Eeuo pipefail
           export HOME=/home/abeyy
           export PATH="$HOME/.local/bin:$HOME/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
           test "$(hostname)" = redmi-build
-          echo "VERIFY_MACHINE=$(hostname) ACTIONS_RUNNER=${RUNNER_NAME:-unknown}"
+          echo "MACHINE=$(hostname) CURRENT_RUNNER=${RUNNER_NAME:-unknown}"
           GH_LOCAL=(env -u GH_TOKEN -u GITHUB_TOKEN gh)
-          repos=(AppCompiler-PWA OpenWRT---AbeyyWRT SK-Gong-Kapas X7-Core-Academy XHomeNetwork XMA7 XSAHub XStay-Manager)
+          "${GH_LOCAL[@]}" auth status >/dev/null 2>&1
 
-          pass=0
-          for attempt in $(seq 1 60); do
-            total=0; online=0; legacy=0
-            out=''
-            for repo in "${repos[@]}"; do
-              j="$("${GH_LOCAL[@]}" api "repos/AbeyyN/$repo/actions/runners")"
-              rows="$(jq -r '.runners[]? | [.name,(.labels|map(.name)|join(",")),.status,.busy] | @tsv' <<<"$j")"
-              out+=$'--- '"$repo"$' ---\n'"$rows"$'\n'
-              c="$(jq '[.runners[]? | select(([.labels[]?.name]|index("redmi"))!=null)] | length' <<<"$j")"
-              o="$(jq '[.runners[]? | select((([.labels[]?.name]|index("redmi"))!=null) and .status=="online")] | length' <<<"$j")"
-              b="$(jq '[.runners[]? | select((.name|test("Fujitsu|FUJITSU|fujitsu")) or (([.labels[]?.name]|index("fujitsu"))!=null))] | length' <<<"$j")"
-              total=$((total+c)); online=$((online+o)); legacy=$((legacy+b))
-            done
-            echo "ATTEMPT=$attempt REDMI=$online/$total LEGACY=$legacy"
-            if [ "$total" -eq 10 ] && [ "$online" -eq 10 ] && [ "$legacy" -eq 0 ]; then
-              printf '%s' "$out"
-              pass=1
-              break
+          case "${RUNNER_NAME:-}" in
+            Fujitsu-PWA|Redmi-PWA) CURRENT_DIR='AppCompiler-PWA'; CURRENT_OLD='Fujitsu-PWA'; CURRENT_NEW='Redmi-PWA'; CURRENT_LABELS='redmi,pwa,central' ;;
+            Fujitsu-PWA-01|Redmi-PWA-01) CURRENT_DIR='AppCompiler-PWA-01'; CURRENT_OLD='Fujitsu-PWA-01'; CURRENT_NEW='Redmi-PWA-01'; CURRENT_LABELS='redmi,pwa,central' ;;
+            *) echo "Unexpected AppCompiler runner: ${RUNNER_NAME:-unknown}"; exit 10 ;;
+          esac
+
+          echo '=== STOP AUTO-RESTART DURING TRANSACTION ==='
+          tmux kill-session -t redmi-health 2>/dev/null || true
+          pkill -TERM -f '/home/abeyy/bin/[r]edmi-runner-health-loop.sh' 2>/dev/null || true
+          pkill -TERM -f '/home/abeyy/bin/[r]edmi-runner-manager.sh' 2>/dev/null || true
+          sleep 2
+
+          DIRS=(AppCompiler-PWA AppCompiler-PWA-01 OpenWRT---AbeyyWRT OpenWRT---AbeyyWRT-light SK-Gong-Kapas X7-Core-Academy XHomeNetwork XMA7 XSAHub XStay-Manager)
+          REPOS=(AppCompiler-PWA AppCompiler-PWA OpenWRT---AbeyyWRT OpenWRT---AbeyyWRT SK-Gong-Kapas X7-Core-Academy XHomeNetwork XMA7 XSAHub XStay-Manager)
+          OLDN=(Fujitsu-PWA Fujitsu-PWA-01 Fujitsu-Ubuntu Fujitsu-Ubuntu-Light Fujitsu-Ubuntu Fujitsu-Ubuntu Fujitsu-Ubuntu Fujitsu-Ubuntu Fujitsu-Ubuntu Fujitsu-Ubuntu-XStay)
+          NEWN=(Redmi-PWA Redmi-PWA-01 Redmi-Ubuntu Redmi-Ubuntu-Light Redmi-Ubuntu Redmi-Ubuntu Redmi-Ubuntu Redmi-Ubuntu Redmi-Ubuntu Redmi-Ubuntu-XStay)
+          LABS=(redmi,pwa,central redmi,pwa,central redmi,openwrt,linux-build redmi,light,diagnostic redmi,android,pwa,flutter,api36,linux-build redmi,android,pwa,flutter,api36,linux-build redmi,android,pwa,flutter,api36,linux-build redmi,android,pwa,flutter,api36,linux-build redmi,android,pwa,flutter,api36,linux-build redmi,android,pwa,flutter,api36,linux-build)
+          BACK="$HOME/.redmi-staged-backup-$(date +%Y%m%d-%H%M%S)"
+          mkdir -p "$BACK"
+
+          register_name() {
+            local base="$1" repo="$2" name="$3" labels="$4" token
+            token="$("${GH_LOCAL[@]}" api -X POST "repos/AbeyyN/$repo/actions/runners/registration-token" --jq '.token')"
+            (cd "$base" && ./config.sh --unattended --replace --url "https://github.com/AbeyyN/$repo" --token "$token" --name "$name" --labels "$labels" --work "../../runner-work/$(basename "$base")")
+          }
+
+          remove_config() {
+            local base="$1" repo="$2" old="$3" oldid rtoken
+            oldid="$("${GH_LOCAL[@]}" api "repos/AbeyyN/$repo/actions/runners" --jq ".runners[]? | select(.name==\"$old\") | .id" | head -1 || true)"
+            rtoken="$("${GH_LOCAL[@]}" api -X POST "repos/AbeyyN/$repo/actions/runners/remove-token" --jq '.token' 2>/dev/null || true)"
+            if [ -n "$rtoken" ]; then
+              (cd "$base" && ./config.sh remove --token "$rtoken") >/dev/null 2>&1 || true
             fi
-            sleep 5
+            [ -z "$oldid" ] || "${GH_LOCAL[@]}" api -X DELETE "repos/AbeyyN/$repo/actions/runners/$oldid" >/dev/null 2>&1 || true
+            rm -f "$base/.runner" "$base/.credentials" "$base/.credentials_rsaparams" "$base/.env" "$base/.path" "$base/.service"
+            test ! -e "$base/.runner"
+          }
+
+          start_and_wait() {
+            local base="$1" repo="$2" name="$3" log="$HOME/logs/actions-runner/$(basename "$base").log" st
+            env -u RUNNER_TRACKING_ID -u GITHUB_ACTIONS -u CI nohup bash -lc "cd '$base' && exec ./run.sh" >>"$log" 2>&1 </dev/null &
+            for q in $(seq 1 40); do
+              st="$("${GH_LOCAL[@]}" api "repos/AbeyyN/$repo/actions/runners" --jq ".runners[]? | select(.name==\"$name\") | .status" | head -1 || true)"
+              [ "$st" = online ] && return 0
+              sleep 2
+            done
+            return 1
+          }
+
+          echo '=== RE-REGISTER 9 NON-CURRENT RUNNERS ==='
+          for i in "${!DIRS[@]}"; do
+            dir="${DIRS[$i]}"; repo="${REPOS[$i]}"; old="${OLDN[$i]}"; new="${NEWN[$i]}"; labels="${LABS[$i]}"; base="$HOME/actions-runner/$dir"
+            [ "$dir" = "$CURRENT_DIR" ] && { echo "SKIP_CURRENT $dir $old -> $new"; continue; }
+            echo "--- $dir : $old -> $new ---"
+            test -x "$base/config.sh"
+            mkdir -p "$BACK/$dir"
+            for f in .runner .credentials .credentials_rsaparams .env .path; do [ -e "$base/$f" ] && cp -a "$base/$f" "$BACK/$dir/$f" || true; done
+            pkill -TERM -f "$base/bin/[R]unner.Listener run" 2>/dev/null || true
+            pkill -TERM -f "$base/bin/[R]unner.Worker" 2>/dev/null || true
+            sleep 1
+            newid="$("${GH_LOCAL[@]}" api "repos/AbeyyN/$repo/actions/runners" --jq ".runners[]? | select(.name==\"$new\") | .id" | head -1 || true)"
+            [ -z "$newid" ] || "${GH_LOCAL[@]}" api -X DELETE "repos/AbeyyN/$repo/actions/runners/$newid" >/dev/null 2>&1 || true
+            remove_config "$base" "$repo" "$old"
+            ok=0
+            for try in 1 2 3; do
+              echo "CONFIG_TRY=$try $dir"
+              if register_name "$base" "$repo" "$new" "$labels"; then ok=1; break; fi
+              rm -f "$base/.runner" "$base/.credentials" "$base/.credentials_rsaparams" "$base/.env" "$base/.path" "$base/.service"
+              sleep 2
+            done
+            [ "$ok" -eq 1 ] || { echo "FATAL_CONFIG $dir"; exit 30; }
+            awk '!/^ACTIONS_RUNNER_HOOK_JOB_STARTED=|^ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/' "$base/.env" 2>/dev/null > "$base/.env.new" || true
+            printf '%s\n' 'ACTIONS_RUNNER_HOOK_JOB_STARTED=/home/abeyy/bin/redmi-job-started.sh' 'ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/home/abeyy/bin/redmi-job-completed.sh' >> "$base/.env.new"
+            mv "$base/.env.new" "$base/.env"
+            start_and_wait "$base" "$repo" "$new" || { echo "FATAL_ONLINE $dir $new"; exit 31; }
+            echo "RENAMED_ONLINE $dir $new"
           done
-          [ "$pass" -eq 1 ]
 
-          echo '=== RASPI DASHBOARD ==='
-          health="$(curl -fsS --max-time 8 http://192.168.1.99:9860/health)"
-          state="$(curl -fsS --max-time 10 http://192.168.1.99:9860/api/state)"
-          echo "$health"
-          python3 - "$state" <<'PY'
+          echo '=== VERIFY NINE + CURRENT LEGACY ==='
+          total_redmi=0
+          for repo in "${REPOS[@]}"; do :; done
+          for repo in AppCompiler-PWA OpenWRT---AbeyyWRT SK-Gong-Kapas X7-Core-Academy XHomeNetwork XMA7 XSAHub XStay-Manager; do
+            j="$("${GH_LOCAL[@]}" api "repos/AbeyyN/$repo/actions/runners")"
+            echo "$j" | jq -r '.runners[]? | [.name,(.labels|map(.name)|join(",")),.status,.busy] | @tsv'
+            c="$(jq '[.runners[]? | select(([.labels[]?.name]|index("redmi"))!=null and .status=="online")] | length' <<<"$j")"
+            total_redmi=$((total_redmi+c))
+          done
+          echo "STAGED_REDMI_ONLINE=$total_redmi EXPECTED=9"
+          [ "$total_redmi" -eq 9 ]
+
+          echo '=== WRITE CURRENT-RUNNER HANDOFF ==='
+          cat > "$HOME/bin/redmi-final-current.sh" <<EOF
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          export HOME=/home/abeyy
+          export PATH="\$HOME/.local/bin:\$HOME/bin:/usr/local/bin:/usr/bin:/bin:\$PATH"
+          LOG="\$HOME/redmi-final-current.log"
+          exec >>"\$LOG" 2>&1
+          echo "===== FINAL CURRENT RUNNER \$(date -Is) ====="
+          GH_LOCAL=(env -u GH_TOKEN -u GITHUB_TOKEN gh)
+          DIR='$CURRENT_DIR'; REPO='AppCompiler-PWA'; OLD='$CURRENT_OLD'; NEW='$CURRENT_NEW'; LABELS='$CURRENT_LABELS'; BASE="\$HOME/actions-runner/$CURRENT_DIR"
+          for n in \$(seq 1 120); do c="\$(pgrep -fc 'Runner.Worker' || true)"; [ "\$c" -eq 0 ] && break; echo "workers=\$c wait=\$n"; sleep 3; done
+          c="\$(pgrep -fc 'Runner.Worker' || true)"; [ "\$c" -eq 0 ] || { echo "FATAL_WORKERS=\$c"; exit 40; }
+          pkill -TERM -f '/home/abeyy/bin/[r]edmi-runner-manager.sh' 2>/dev/null || true
+          tmux kill-session -t redmi-health 2>/dev/null || true
+          pkill -TERM -f "\$BASE/bin/[R]unner.Listener run" 2>/dev/null || true
+          sleep 2
+          oldid="\$("\${GH_LOCAL[@]}" api "repos/AbeyyN/\$REPO/actions/runners" --jq ".runners[]? | select(.name==\\"\$OLD\\") | .id" | head -1 || true)"
+          rtoken="\$("\${GH_LOCAL[@]}" api -X POST "repos/AbeyyN/\$REPO/actions/runners/remove-token" --jq '.token' 2>/dev/null || true)"
+          [ -z "\$rtoken" ] || (cd "\$BASE" && ./config.sh remove --token "\$rtoken") >/dev/null 2>&1 || true
+          [ -z "\$oldid" ] || "\${GH_LOCAL[@]}" api -X DELETE "repos/AbeyyN/\$REPO/actions/runners/\$oldid" >/dev/null 2>&1 || true
+          newid="\$("\${GH_LOCAL[@]}" api "repos/AbeyyN/\$REPO/actions/runners" --jq ".runners[]? | select(.name==\\"\$NEW\\") | .id" | head -1 || true)"
+          [ -z "\$newid" ] || "\${GH_LOCAL[@]}" api -X DELETE "repos/AbeyyN/\$REPO/actions/runners/\$newid" >/dev/null 2>&1 || true
+          rm -f "\$BASE/.runner" "\$BASE/.credentials" "\$BASE/.credentials_rsaparams" "\$BASE/.env" "\$BASE/.path" "\$BASE/.service"
+          token="\$("\${GH_LOCAL[@]}" api -X POST "repos/AbeyyN/\$REPO/actions/runners/registration-token" --jq '.token')"
+          cd "\$BASE"
+          ./config.sh --unattended --replace --url "https://github.com/AbeyyN/\$REPO" --token "\$token" --name "\$NEW" --labels "\$LABELS" --work "../../runner-work/\$DIR"
+          awk '!/^ACTIONS_RUNNER_HOOK_JOB_STARTED=|^ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/' .env 2>/dev/null > .env.new || true
+          printf '%s\n' 'ACTIONS_RUNNER_HOOK_JOB_STARTED=/home/abeyy/bin/redmi-job-started.sh' 'ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/home/abeyy/bin/redmi-job-completed.sh' >> .env.new
+          mv .env.new .env
+          cd "\$HOME"
+          env -u RUNNER_TRACKING_ID -u GITHUB_ACTIONS -u CI nohup bash -lc "cd '\$BASE' && exec ./run.sh" >>"\$HOME/logs/actions-runner/\$DIR.log" 2>&1 </dev/null &
+          online=0
+          for q in \$(seq 1 50); do st="\$("\${GH_LOCAL[@]}" api "repos/AbeyyN/\$REPO/actions/runners" --jq ".runners[]? | select(.name==\\"\$NEW\\") | .status" | head -1 || true)"; [ "\$st" = online ] && { online=1; break; }; sleep 2; done
+          [ "\$online" -eq 1 ] || { echo "FATAL_CURRENT_ONLINE \$NEW"; exit 41; }
+          rm -f "\$HOME/bin/fujitsu-job-started.sh" "\$HOME/bin/fujitsu-job-completed.sh" "\$HOME/.ssh/fujitsu-build-home"
+          rm -f "\$HOME/bin"/start-all-github-runners.sh.bak.* "\$HOME/bin"/start-all-github-runners.sh.pre-* 2>/dev/null || true
+          find "\$HOME/bin" -maxdepth 1 -type f -name 'fujitsu-*' -delete 2>/dev/null || true
+          find "\$HOME/bin" -maxdepth 1 -type l -name 'fujitsu-*' -delete 2>/dev/null || true
+          "\$HOME/bin/start-all-github-runners.sh" || true
+          sleep 5
+          total=0; onlinec=0; legacy=0
+          for repo in AppCompiler-PWA OpenWRT---AbeyyWRT SK-Gong-Kapas X7-Core-Academy XHomeNetwork XMA7 XSAHub XStay-Manager; do
+            j="\$("\${GH_LOCAL[@]}" api "repos/AbeyyN/\$repo/actions/runners")"
+            echo "\$j" | jq -r '.runners[]? | [.name,(.labels|map(.name)|join(",")),.status,.busy] | @tsv'
+            total=\$((total+\$(jq '[.runners[]? | select(([.labels[]?.name]|index("redmi"))!=null)] | length' <<<"\$j")))
+            onlinec=\$((onlinec+\$(jq '[.runners[]? | select((([.labels[]?.name]|index("redmi"))!=null) and .status=="online")] | length' <<<"\$j")))
+            legacy=\$((legacy+\$(jq '[.runners[]? | select((.name|test("Fujitsu|FUJITSU|fujitsu")) or (([.labels[]?.name]|index("fujitsu"))!=null))] | length' <<<"\$j")))
+          done
+          echo "FINAL_FLEET REDMI=\$onlinec/\$total LEGACY=\$legacy"
+          [ "\$total" -eq 10 ] && [ "\$onlinec" -eq 10 ] && [ "\$legacy" -eq 0 ]
+          ! ss -lnt 2>/dev/null | grep -qE ':9860\\b'
+          state="\$(curl -fsS --max-time 10 http://192.168.1.99:9860/api/state)"
+          python3 - "\$state" <<'PY'
           import json,sys
-          d=json.loads(sys.argv[1])
-          assert d.get('source')=='redmi-build', d.get('source')
-          assert d.get('dashboard_owner')=='rapsi-nas', d.get('dashboard_owner')
-          rr=d.get('runners') or []
-          online=sum(bool(x.get('online')) for x in rr)
-          print('DASHBOARD_OWNER',d.get('dashboard_owner'))
-          print('DASHBOARD_SOURCE',d.get('source'))
-          print('DASHBOARD_RUNNERS',online,len(rr))
+          d=json.loads(sys.argv[1]); assert d.get('source')=='redmi-build'; assert d.get('dashboard_owner')=='rapsi-nas'; print('RASPI_DASHBOARD_OK',d.get('source'),d.get('dashboard_owner'))
           PY
-          grep -q '"owner":"rapsi-nas"' <<<"$health"
+          [ -x "\$HOME/bin/redmi-telegram" ] && "\$HOME/bin/redmi-telegram" "✅ Redmi build migration COMPLETE\n\nHost: redmi-build\nGitHub runners: 10/10 online\nDashboard owner: rapsi-nas\nLegacy Fujitsu build identity: removed\n\nFujitsu lama selamat untuk dipasang semula sebagai fujitsu-server." || true
+          echo "FINAL_CURRENT_PASS \$(date -Is)"
+          EOF
+          chmod 755 "$HOME/bin/redmi-final-current.sh"
 
-          echo '=== REDMI HEADLESS SERVICES ==='
-          ! ss -lnt 2>/dev/null | grep -qE ':9860\b'
-          curl -fsS http://127.0.0.1:9862/health
-          echo
-          curl -fsS http://127.0.0.1:9861/state
-          echo
-
-          echo '=== LEGACY RUNTIME AUDIT ==='
-          ! find "$HOME/bin" -maxdepth 1 -iname 'fujitsu*' | grep -q .
-          ! test -e "$HOME/.config/fujitsu-runner"
-          ! test -e "$HOME/.local/state/fujitsu-runner"
-          ! test -e "$HOME/.local/share/fujitsu-runner"
-          ! test -e "$HOME/.local/share/fujitsu-scheduler"
-          ! test -e "$HOME/.ssh/fujitsu-build-home"
-          ! grep -RInI -E 'FUJITSU|Fujitsu|fujitsu' "$HOME/actions-runner"/*/.env "$HOME/bin/start-all-github-runners.sh" "$HOME/bin/redmi-runner-health-loop.sh" "$HOME/bin/redmi-telegram-status" "$HOME/bin/redmi-telegram-command-bot" 2>/dev/null | grep -q .
-
-          echo '=== BOOT ==='
-          crontab -l
-          crontab -l | grep -q '986-redmi-runtime'
-          crontab -l | grep -q '986-redmi-telemetry'
-          ! crontab -l | grep -qi fujitsu
-
-          echo '=== TMUX ==='
-          tmux ls 2>/dev/null || true
-          ! tmux ls 2>/dev/null | grep -qi fujitsu
-
-          echo 'FINAL_CUTOVER_VERIFIED=PASS'
+          echo '=== DETACH HANDOFF AFTER THIS JOB ==='
+          rm -f "$HOME/redmi-final-current-launch.log"
+          setsid -f env -u RUNNER_TRACKING_ID -u GITHUB_ACTIONS -u CI bash -lc 'sleep 18; exec /home/abeyy/bin/redmi-final-current.sh' >>"$HOME/redmi-final-current-launch.log" 2>&1 </dev/null
+          echo "STAGED_9_OF_10=PASS CURRENT=$CURRENT_DIR HANDOFF=DETACHED"
