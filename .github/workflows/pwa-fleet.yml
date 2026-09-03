@@ -15,7 +15,7 @@ concurrency:
 jobs:
   build:
     name: Detect + Build Changed PWAs
-    runs-on: [self-hosted, linux, x64, fujitsu, pwa, central]
+    runs-on: [self-hosted, linux, x64, redmi, pwa, central]
     timeout-minutes: 75
     steps:
       - name: Checkout PWA fleet
@@ -27,5 +27,5 @@ jobs:
       - name: Build changed PWA projects
         shell: bash
         env:
-          FUJITSU_BUILD_CLASS: light
+          REDMI_BUILD_CLASS: light
         run: bash scripts/build-fleet.sh
