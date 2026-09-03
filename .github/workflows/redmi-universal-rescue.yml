@@ -1,0 +1,48 @@
+name: Redmi Universal Rescue
+on:
+  push:
+    paths: ['.github/workflows/redmi-universal-rescue.yml']
+  workflow_dispatch:
+jobs:
+  rescue:
+    runs-on: self-hosted
+    timeout-minutes: 10
+    steps:
+      - name: Convert Redmi runner fleet to persistent systemd services
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          export HOME=/home/abeyy
+          test "$(hostname)" = redmi-build
+          current=''
+          for d in "$HOME"/actions-runner/*; do [ -f "$d/.runner" ] || continue; n=$(jq -r '.agentName // empty' "$d/.runner" 2>/dev/null || true); [ "$n" = "${RUNNER_NAME:-}" ] && current=$(basename "$d"); done
+          echo "RUNNER=${RUNNER_NAME:-unknown} CURRENT_DIR=$current"
+          sudo -n tee /etc/systemd/system/redmi-runner@.service >/dev/null <<'UNIT'
+          [Unit]
+          Description=986 Redmi GitHub Actions Runner %i
+          After=network-online.target
+          Wants=network-online.target
+          [Service]
+          Type=simple
+          User=abeyy
+          Group=abeyy
+          WorkingDirectory=/home/abeyy/actions-runner/%i
+          Environment=HOME=/home/abeyy
+          Environment=RUNNER_TRACKING_ID=
+          Environment=GITHUB_ACTIONS=
+          Environment=CI=
+          ExecStart=/bin/bash -lc 'source /home/abeyy/bin/redmi-build-env.sh 2>/dev/null || true; exec ./run.sh'
+          Restart=always
+          RestartSec=5
+          KillMode=control-group
+          [Install]
+          WantedBy=multi-user.target
+          UNIT
+          sudo -n systemctl daemon-reload
+          pkill -TERM -f '/home/abeyy/bin/[r]edmi-runner-manager.sh' 2>/dev/null || true
+          (crontab -l 2>/dev/null | grep -v 'redmi-runner-manager.sh' || true) | crontab -
+          dirs=(AppCompiler-PWA AppCompiler-PWA-01 OpenWRT---AbeyyWRT OpenWRT---AbeyyWRT-light SK-Gong-Kapas X7-Core-Academy XHomeNetwork XMA7 XSAHub XStay-Manager)
+          for n in "${dirs[@]}"; do [ -f "$HOME/actions-runner/$n/.runner" ] || continue; sudo -n systemctl enable "redmi-runner@$n.service" >/dev/null; [ "$n" = "$current" ] && continue; pkill -TERM -f "$HOME/actions-runner/$n/bin/[R]unner.Listener run" 2>/dev/null || true; sleep 1; sudo -n systemctl restart "redmi-runner@$n.service"; done
+          [ -n "$current" ] && sudo -n systemd-run --unit=redmi-current-runner-cutover --on-active=35s /bin/systemctl restart "redmi-runner@$current.service" >/dev/null || true
+          sudo -n systemd-run --unit=redmi-telemetry-refresh --on-active=50s /bin/bash -lc 'pkill -TERM -f "/home/abeyy/redmi-telemetry/[t]elemetry.py" 2>/dev/null || true; sleep 2; setsid -f env -u RUNNER_TRACKING_ID -u GITHUB_ACTIONS -u CI python3 /home/abeyy/redmi-telemetry/telemetry.py >>/home/abeyy/redmi-telemetry/telemetry.log 2>&1' >/dev/null || true
+          echo UNIVERSAL_RESCUE_SCHEDULED=YES
