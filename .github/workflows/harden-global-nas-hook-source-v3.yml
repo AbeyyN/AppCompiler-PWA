@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   harden:
-    runs-on: [self-hosted, linux, x64, fujitsu, pwa, central]
+    runs-on: [self-hosted, linux, x64, redmi, pwa, central]
     timeout-minutes: 15
     steps:
       - name: Persist NAS-first hook in APK delivery installer
@@ -34,8 +34,8 @@ jobs:
           from pathlib import Path
           import re,sys
           p=Path(sys.argv[1]); replacement=Path(sys.argv[2]).read_text(); s=p.read_text()
-          pat=r'(?ms)^      - name: Install completed hook on every Fujitsu runner\n.*?(?=^      - name: Schedule safe runner reload)'
-          if 'Install NAS-first completed hook on every Fujitsu runner' in s:
+          pat=r'(?ms)^      - name: Install completed hook on every Redmi runner\n.*?(?=^      - name: Schedule safe runner reload)'
+          if 'Install NAS-first completed hook on every Redmi runner' in s:
               ns=s
           else:
               ns,n=re.subn(pat,lambda _: replacement,s,count=1)
@@ -43,8 +43,8 @@ jobs:
                   raise SystemExit(f'expected one old hook section, got {n}')
           p.write_text(ns)
           PY
-          grep -q 'Install NAS-first completed hook on every Fujitsu runner' "$src"
-          grep -q 'fujitsu-nas-artifact-store' "$src"
+          grep -q 'Install NAS-first completed hook on every Redmi runner' "$src"
+          grep -q 'redmi-nas-artifact-store' "$src"
           python3 - "$src" <<'PY'
           import sys,yaml
           yaml.safe_load(open(sys.argv[1]))
@@ -76,9 +76,9 @@ jobs:
               for p in base.rglob('*'):
                   if not p.is_file(): continue
                   s=p.read_text(errors='ignore')
-                  if 'fujitsu-job-completed.sh' in s and 'cat >' in s:
+                  if 'redmi-job-completed.sh' in s and 'cat >' in s:
                       rel=str(p.relative_to(root)); writers.append(rel)
-                      if 'fujitsu-nas-artifact-store' not in s: bad.append(rel)
+                      if 'redmi-nas-artifact-store' not in s: bad.append(rel)
           print('HOOK_WRITERS='+','.join(writers))
           print('UNSAFE_WRITERS='+(','.join(bad) if bad else 'none'))
           if bad: raise SystemExit('unsafe hook writers: '+', '.join(bad))

@@ -1,19 +1,19 @@
-name: Deploy Fujitsu Dashboard v3
+name: Deploy Redmi Dashboard v3
 
 on:
   workflow_dispatch:
   push:
     branches: [main]
     paths:
-      - 'infra/fujitsu-dashboard/**'
-      - '.github/workflows/deploy-fujitsu-dashboard-v3.yml'
+      - 'infra/redmi-dashboard/**'
+      - '.github/workflows/deploy-redmi-dashboard-v3.yml'
 
 permissions:
   contents: read
 
 jobs:
   deploy:
-    runs-on: [self-hosted, linux, x64, fujitsu, pwa, central]
+    runs-on: [self-hosted, linux, x64, redmi, pwa, central]
     timeout-minutes: 8
     steps:
       - name: Checkout dashboard source
@@ -23,31 +23,31 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 -m py_compile infra/fujitsu-dashboard/dashboard_server.py
-          test -s infra/fujitsu-dashboard/index.html
-          grep -q 'Hermes 986 CI Doctor' infra/fujitsu-dashboard/index.html
-          grep -q 'discover_local_runners' infra/fujitsu-dashboard/dashboard_server.py
+          python3 -m py_compile infra/redmi-dashboard/dashboard_server.py
+          test -s infra/redmi-dashboard/index.html
+          grep -q 'Hermes 986 CI Doctor' infra/redmi-dashboard/index.html
+          grep -q 'discover_local_runners' infra/redmi-dashboard/dashboard_server.py
 
       - name: Backup and install dashboard v3
         shell: bash
         run: |
           set -euo pipefail
-          dst="$HOME/fujitsu-dashboard"
+          dst="$HOME/redmi-dashboard"
           mkdir -p "$dst/backups"
           stamp="$(date +%Y%m%d-%H%M%S)"
           [ ! -f "$dst/dashboard_server.py" ] || cp "$dst/dashboard_server.py" "$dst/backups/dashboard_server.py.$stamp"
           [ ! -f "$dst/index.html" ] || cp "$dst/index.html" "$dst/backups/index.html.$stamp"
-          install -m 755 infra/fujitsu-dashboard/dashboard_server.py "$dst/dashboard_server.py"
-          install -m 644 infra/fujitsu-dashboard/index.html "$dst/index.html"
+          install -m 755 infra/redmi-dashboard/dashboard_server.py "$dst/dashboard_server.py"
+          install -m 644 infra/redmi-dashboard/index.html "$dst/index.html"
           python3 -m py_compile "$dst/dashboard_server.py"
 
-      - name: Restart Fujitsu dashboard safely
+      - name: Restart Redmi dashboard safely
         shell: bash
         run: |
           set -euo pipefail
-          dst="$HOME/fujitsu-dashboard"
+          dst="$HOME/redmi-dashboard"
           dashboard_path="$HOME/.local/bin:$HOME/bin:$PATH"
-          tmux kill-session -t fujitsu-dashboard 2>/dev/null || true
+          tmux kill-session -t redmi-dashboard 2>/dev/null || true
           for pid in $(pgrep -f 'dashboard_server\.py' || true); do
             [ "$pid" = "$$" ] || kill "$pid" 2>/dev/null || true
           done
@@ -55,7 +55,7 @@ jobs:
             if ! pgrep -f 'dashboard_server\.py' >/dev/null 2>&1; then break; fi
             sleep 0.25
           done
-          tmux new-session -d -s fujitsu-dashboard "export PATH='$dashboard_path'; cd '$dst'; exec python3 dashboard_server.py >> '$dst/dashboard.log' 2>&1"
+          tmux new-session -d -s redmi-dashboard "export PATH='$dashboard_path'; cd '$dst'; exec python3 dashboard_server.py >> '$dst/dashboard.log' 2>&1"
           for _ in $(seq 1 30); do
             if curl -fsS --max-time 2 http://127.0.0.1:9860/healthz | grep -q '^ok'; then
               echo DASHBOARD_HEALTHZ_OK=1
@@ -73,10 +73,10 @@ jobs:
           set -euo pipefail
           ready=0
           for _ in $(seq 1 30); do
-            if curl -fsS --max-time 20 http://127.0.0.1:9860/api/status -o /tmp/fujitsu-dashboard-status.json; then
+            if curl -fsS --max-time 20 http://127.0.0.1:9860/api/status -o /tmp/redmi-dashboard-status.json; then
               if python3 - <<'PY'
           import json
-          d=json.load(open('/tmp/fujitsu-dashboard-status.json'))
+          d=json.load(open('/tmp/redmi-dashboard-status.json'))
           s=d.get('summary') or {}
           h=d.get('hermes') or {}
           total=int(s.get('runner_total') or 0)
@@ -97,7 +97,7 @@ jobs:
             python3 - <<'PY'
           import json
           try:
-              d=json.load(open('/tmp/fujitsu-dashboard-status.json'))
+              d=json.load(open('/tmp/redmi-dashboard-status.json'))
               print('summary=', d.get('summary'))
               print('hermes=', d.get('hermes'))
               print('github=', d.get('github'))
@@ -105,7 +105,7 @@ jobs:
           except Exception as e:
               print('status_read_error=', type(e).__name__)
           PY
-            tail -n 120 "$HOME/fujitsu-dashboard/dashboard.log" || true
+            tail -n 120 "$HOME/redmi-dashboard/dashboard.log" || true
             exit 1
           fi
           echo DASHBOARD_CACHE_READY=1
@@ -114,10 +114,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          curl -fsS --max-time 20 http://127.0.0.1:9860/api/status -o /tmp/fujitsu-dashboard-status.json
+          curl -fsS --max-time 20 http://127.0.0.1:9860/api/status -o /tmp/redmi-dashboard-status.json
           python3 - <<'PY'
           import json
-          d=json.load(open('/tmp/fujitsu-dashboard-status.json'))
+          d=json.load(open('/tmp/redmi-dashboard-status.json'))
           s=d.get('summary') or {}
           h=d.get('hermes') or {}
           projects=d.get('projects') or []
@@ -152,6 +152,6 @@ jobs:
         run: |
           set -euo pipefail
           pgrep -f 'dashboard_server\.py' >/dev/null
-          tmux has-session -t fujitsu-dashboard
-          curl -fsS --max-time 5 http://127.0.0.1:9860/ | grep -q 'FUJITSU Runner Fleet'
-          echo FUJITSU_DASHBOARD_V3_READY=1
+          tmux has-session -t redmi-dashboard
+          curl -fsS --max-time 5 http://127.0.0.1:9860/ | grep -q 'REDMI Runner Fleet'
+          echo REDMI_DASHBOARD_V3_READY=1

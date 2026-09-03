@@ -130,12 +130,12 @@ jobs:
           env -u RUNNER_TRACKING_ID -u GITHUB_ACTIONS -u CI nohup "$HOME/bin/redmi-runner-manager.sh" >>"$HOME/redmi-runner-manager.nohup.log" 2>&1 </dev/null &
           sleep 10
 
-          echo '=== 3. CLEAR STALE FUJITSU-LABEL QUEUES AND RESTART PWA FLEET ==='
+          echo '=== 3. CLEAR STALE REDMI-LABEL QUEUES AND RESTART PWA FLEET ==='
           "${GH_LOCAL[@]}" api -X POST repos/AbeyyN/AppCompiler-PWA/actions/runs/33739852861/cancel >/dev/null 2>&1 || true
           "${GH_LOCAL[@]}" api -X POST repos/AbeyyN/XMA7/actions/runs/33718328344/cancel >/dev/null 2>&1 || true
           "${GH_LOCAL[@]}" workflow run pwa-fleet.yml -R AbeyyN/AppCompiler-PWA --ref main || true
 
-          echo '=== 4. SWEEP ACTIVE DEFAULT WORKFLOWS FOR LEGACY FUJITSU ROUTING ==='
+          echo '=== 4. SWEEP ACTIVE DEFAULT WORKFLOWS FOR LEGACY REDMI ROUTING ==='
           SWEEP="$(mktemp -d)"
           for repo in AppCompiler-PWA OpenWRT---AbeyyWRT SK-Gong-Kapas X7-Core-Academy XHomeNetwork XMA7 XSAHub XStay-Manager; do
             dst="$SWEEP/$repo"
@@ -144,12 +144,12 @@ jobs:
             [ -d .github/workflows ] || { cd "$HOME"; continue; }
             while IFS= read -r f; do
               [ -n "$f" ] || continue
-              sed -i -e 's/FUJITSU/REDMI/g' -e 's/Fujitsu/Redmi/g' -e 's/fujitsu/redmi/g' "$f"
-            done < <(grep -RIl -E 'FUJITSU|Fujitsu|fujitsu' .github/workflows 2>/dev/null || true)
+              sed -i -e 's/REDMI/REDMI/g' -e 's/Redmi/Redmi/g' -e 's/redmi/redmi/g' "$f"
+            done < <(grep -RIl -E 'REDMI|Redmi|redmi' .github/workflows 2>/dev/null || true)
             git config user.name 'AbeyyTechXy Ops'; git config user.email 'abeyytechxy.dev@gmail.com'
             git add .github/workflows
             if ! git diff --cached --quiet; then
-              git commit -m 'ci: remove final Fujitsu runner routing [skip ci]' >/dev/null
+              git commit -m 'ci: remove final Redmi runner routing [skip ci]' >/dev/null
               git push >/dev/null
               echo "WORKFLOW_SWEEP_UPDATED $repo"
             fi
@@ -203,7 +203,7 @@ jobs:
             total=$((total+$(jq '[.runners[]? | select(([.labels[]?.name]|index("redmi"))!=null)]|length' <<<"$j")))
             online=$((online+$(jq '[.runners[]? | select((([.labels[]?.name]|index("redmi"))!=null) and .status=="online")]|length' <<<"$j")))
             busy=$((busy+$(jq '[.runners[]? | select((([.labels[]?.name]|index("redmi"))!=null) and .busy==true)]|length' <<<"$j")))
-            legacy=$((legacy+$(jq '[.runners[]? | select((.name|test("Fujitsu|FUJITSU|fujitsu")) or (([.labels[]?.name]|index("fujitsu"))!=null))]|length' <<<"$j")))
+            legacy=$((legacy+$(jq '[.runners[]? | select((.name|test("Redmi|REDMI|redmi")) or (([.labels[]?.name]|index("redmi"))!=null))]|length' <<<"$j")))
           done
           echo "FINAL_FLEET ONLINE=$online/$total BUSY=$busy LEGACY=$legacy"
           [ "$online" -eq 10 ] && [ "$total" -eq 10 ] && [ "$legacy" -eq 0 ]

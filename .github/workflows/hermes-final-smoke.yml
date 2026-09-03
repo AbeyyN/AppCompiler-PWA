@@ -8,7 +8,7 @@ permissions:
 
 jobs:
   smoke:
-    runs-on: [self-hosted, linux, x64, fujitsu, pwa, central]
+    runs-on: [self-hosted, linux, x64, redmi, pwa, central]
     timeout-minutes: 6
     steps:
       - name: Finalize safe CI Doctor config
@@ -26,7 +26,7 @@ jobs:
             cat >> "$policy" <<'EOF'
 
           ## GitHub access
-          - GitHub CLI (`gh`) is installed and authenticated on FUJITSU-BUILD.
+          - GitHub CLI (`gh`) is installed and authenticated on REDMI-BUILD.
           - Prefer `gh run list`, `gh run view`, `gh api`, and local git for CI diagnosis.
           - Reading repositories, workflow state, and logs is allowed by default.
           - Never print `gh auth token`, credential files, Authorization headers, environment secrets, or full process command lines that may contain credentials.

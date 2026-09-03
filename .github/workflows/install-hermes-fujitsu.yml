@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     paths:
-      - '.github/workflows/install-hermes-fujitsu.yml'
+      - '.github/workflows/install-hermes-redmi.yml'
   workflow_dispatch:
 
 permissions:
@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   install:
-    runs-on: [self-hosted, linux, x64, fujitsu, pwa, central]
+    runs-on: [self-hosted, linux, x64, redmi, pwa, central]
     timeout-minutes: 30
     env:
       HERMES_COMMIT: 00bbfc690060d1323ddb2f065297c7425cb71c26
@@ -53,7 +53,7 @@ jobs:
           mkdir -p "$workspace/logs" "$HOME/bin"
           cat > "$workspace/.hermes.md" <<'EOF'
           # 986Network CI Doctor
-          You diagnose GitHub Actions and FUJITSU-BUILD failures using minimal, reversible changes.
+          You diagnose GitHub Actions and REDMI-BUILD failures using minimal, reversible changes.
           Inspect logs first and verify the root cause before changing anything.
           Check runner health, PATH, disk, Git, Java, Flutter, Android SDK and Gradle when relevant.
           Do not use sudo/root without explicit human approval.

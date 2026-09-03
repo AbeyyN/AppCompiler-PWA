@@ -14,7 +14,7 @@ permissions:
 jobs:
   sync:
     name: Install failure playbook for Hermes 986 CI Doctor
-    runs-on: [self-hosted, linux, x64, fujitsu, pwa, central]
+    runs-on: [self-hosted, linux, x64, redmi, pwa, central]
     timeout-minutes: 5
     steps:
       - name: Checkout operations docs

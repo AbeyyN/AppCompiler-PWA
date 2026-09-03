@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   repair:
-    runs-on: [self-hosted, linux, x64, fujitsu, pwa, central]
+    runs-on: [self-hosted, linux, x64, redmi, pwa, central]
     timeout-minutes: 15
     steps:
       - name: Fix shared runtime first and persist X7 source with retry
@@ -43,8 +43,8 @@ jobs:
           if grep -q 'local cls="\$1" dir=' "$src" || grep -q 'local cls="\$1" base="\$2" dir=' "$src"; then exit 31; fi
 
           # Fix live shared runtime before any network write, so current builds are protected.
-          install -m 0755 "$src" "$HOME/bin/fujitsu-nas-artifact-store"
-          bash -n "$HOME/bin/fujitsu-nas-artifact-store"
+          install -m 0755 "$src" "$HOME/bin/redmi-nas-artifact-store"
+          bash -n "$HOME/bin/redmi-nas-artifact-store"
           echo LIVE_COLLECTOR_FIXED
 
           # Persist the exact fixed collector in the source-of-truth repo with retries.
@@ -62,7 +62,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cat > "$HOME/bin/fujitsu-job-completed.sh" <<'HOOK'
+          cat > "$HOME/bin/redmi-job-completed.sh" <<'HOOK'
           #!/usr/bin/env bash
           set -u
           REPO="${GITHUB_REPOSITORY:-unknown/unknown}"
@@ -70,47 +70,47 @@ jobs:
           WORKFLOW="${GITHUB_WORKFLOW:-job}"
           BRANCH="${GITHUB_REF_NAME:-unknown}"
           safe_repo="${REPO//\//__}"
-          notified="$HOME/.local/state/fujitsu-runner/job-notified/${safe_repo}-${RUN_ID}.done"
-          if [ -x "$HOME/bin/fujitsu-nas-artifact-store" ]; then
-            timeout 900s "$HOME/bin/fujitsu-nas-artifact-store" success "$REPO" "$WORKFLOW" "$BRANCH" "$RUN_ID" || true
+          notified="$HOME/.local/state/redmi-runner/job-notified/${safe_repo}-${RUN_ID}.done"
+          if [ -x "$HOME/bin/redmi-nas-artifact-store" ]; then
+            timeout 900s "$HOME/bin/redmi-nas-artifact-store" success "$REPO" "$WORKFLOW" "$BRANCH" "$RUN_ID" || true
           fi
-          if [ ! -s "$notified" ] && [ -x "$HOME/bin/fujitsu-deliver-build-files" ]; then
-            timeout 660s "$HOME/bin/fujitsu-deliver-build-files" success "$REPO" "$WORKFLOW" "$BRANCH" "$RUN_ID" || true
+          if [ ! -s "$notified" ] && [ -x "$HOME/bin/redmi-deliver-build-files" ]; then
+            timeout 660s "$HOME/bin/redmi-deliver-build-files" success "$REPO" "$WORKFLOW" "$BRANCH" "$RUN_ID" || true
           fi
           exit 0
           HOOK
-          chmod 0755 "$HOME/bin/fujitsu-job-completed.sh"
-          bash -n "$HOME/bin/fujitsu-job-completed.sh"
+          chmod 0755 "$HOME/bin/redmi-job-completed.sh"
+          bash -n "$HOME/bin/redmi-job-completed.sh"
 
           count=0; bad=0
           for d in "$HOME"/actions-runner/*; do
             [ -f "$d/.runner" ] || continue
             envfile="$d/.env"; touch "$envfile"; t="$(mktemp)"
             grep -v '^ACTIONS_RUNNER_HOOK_JOB_COMPLETED=' "$envfile" > "$t" || true
-            printf 'ACTIONS_RUNNER_HOOK_JOB_COMPLETED=%s\n' "$HOME/bin/fujitsu-job-completed.sh" >> "$t"
+            printf 'ACTIONS_RUNNER_HOOK_JOB_COMPLETED=%s\n' "$HOME/bin/redmi-job-completed.sh" >> "$t"
             cat "$t" > "$envfile"; rm -f "$t"
             count=$((count+1))
-            grep -q '^ACTIONS_RUNNER_HOOK_JOB_COMPLETED=.*/fujitsu-job-completed.sh$' "$envfile" || bad=$((bad+1))
+            grep -q '^ACTIONS_RUNNER_HOOK_JOB_COMPLETED=.*/redmi-job-completed.sh$' "$envfile" || bad=$((bad+1))
           done
           echo "RUNNERS=$count BAD=$bad"
           test "$count" -eq 10
           test "$bad" -eq 0
-          grep -q 'fujitsu-nas-artifact-store' "$HOME/bin/fujitsu-job-completed.sh"
+          grep -q 'redmi-nas-artifact-store' "$HOME/bin/redmi-job-completed.sh"
 
       - name: Smoke Android iOS PWA Packages and OpenWrt routes
         shell: bash
         run: |
           set -euo pipefail
-          source "$HOME/.config/fujitsu-runner/nas-artifacts.env"
+          source "$HOME/.config/redmi-runner/nas-artifacts.env"
           app="$RUNNER_TEMP/app-smoke"; owrt="$RUNNER_TEMP/owrt-smoke"
           rm -rf "$app" "$owrt"; mkdir -p "$app/build/web" "$owrt/bin/targets/t/d"
           printf apk > "$app/app-release.apk"; printf aab > "$app/app-release.aab"; printf ipa > "$app/app-release.ipa"
           printf '<title>x</title>' > "$app/build/web/index.html"; printf pkg > "$app/x.txt"; (cd "$app" && zip -q suite-release.zip x.txt)
           printf fw > "$owrt/bin/targets/t/d/x-sysupgrade.bin"; printf sums > "$owrt/bin/targets/t/d/sha256sums"
           r1="app-${GITHUB_RUN_ID}-$(date +%s)"; r2="owrt-${GITHUB_RUN_ID}-$(date +%s)"
-          GITHUB_WORKSPACE="$app" GITHUB_REPOSITORY='AbeyyN/__nas-final-smoke__' GITHUB_RUN_ID="$r1" GITHUB_SHA=x GITHUB_REF_NAME=main GITHUB_REF_TYPE=branch RUNNER_NAME="${RUNNER_NAME:-Fujitsu-PWA-01}" "$HOME/bin/fujitsu-nas-artifact-store" success 'AbeyyN/__nas-final-smoke__' smoke main "$r1"
-          GITHUB_WORKSPACE="$owrt" GITHUB_REPOSITORY='AbeyyN/owrt-final-smoke' GITHUB_RUN_ID="$r2" GITHUB_SHA=x GITHUB_REF_NAME=main GITHUB_REF_TYPE=branch RUNNER_NAME="${RUNNER_NAME:-Fujitsu-PWA-01}" "$HOME/bin/fujitsu-nas-artifact-store" success 'AbeyyN/owrt-final-smoke' smoke main "$r2"
-          "$HOME/bin/fujitsu-nas-ssh" -o BatchMode=yes "$PI_USER@$PI_HOST" "CI_ROOT='$CI_ROOT' bash -s" <<'REMOTE'
+          GITHUB_WORKSPACE="$app" GITHUB_REPOSITORY='AbeyyN/__nas-final-smoke__' GITHUB_RUN_ID="$r1" GITHUB_SHA=x GITHUB_REF_NAME=main GITHUB_REF_TYPE=branch RUNNER_NAME="${RUNNER_NAME:-Redmi-PWA-01}" "$HOME/bin/redmi-nas-artifact-store" success 'AbeyyN/__nas-final-smoke__' smoke main "$r1"
+          GITHUB_WORKSPACE="$owrt" GITHUB_REPOSITORY='AbeyyN/owrt-final-smoke' GITHUB_RUN_ID="$r2" GITHUB_SHA=x GITHUB_REF_NAME=main GITHUB_REF_TYPE=branch RUNNER_NAME="${RUNNER_NAME:-Redmi-PWA-01}" "$HOME/bin/redmi-nas-artifact-store" success 'AbeyyN/owrt-final-smoke' smoke main "$r2"
+          "$HOME/bin/redmi-nas-ssh" -o BatchMode=yes "$PI_USER@$PI_HOST" "CI_ROOT='$CI_ROOT' bash -s" <<'REMOTE'
           set -euo pipefail
           test -f "$CI_ROOT/Apps/Android/__nas-final-smoke__/latest/__nas-final-smoke__-latest.apk"
           test -f "$CI_ROOT/Apps/Android/__nas-final-smoke__/latest/__nas-final-smoke__-latest.aab"

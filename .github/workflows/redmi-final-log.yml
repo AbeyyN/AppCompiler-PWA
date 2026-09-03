@@ -38,7 +38,7 @@ jobs:
           curl -fsS --max-time 8 http://192.168.1.99:9860/health; echo
           curl -fsS --max-time 8 http://192.168.1.99:9860/api/state | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("source"),d.get("dashboard_owner"),[(x.get("directory"),x.get("name"),x.get("online")) for x in d.get("runners",[])])' || true
           echo '=== LEGACY NAMES ==='
-          find "$HOME/bin" -maxdepth 1 -iname 'fujitsu*' -printf '%f -> %l\n' 2>/dev/null || true
+          find "$HOME/bin" -maxdepth 1 -iname 'redmi*' -printf '%f -> %l\n' 2>/dev/null || true
           echo '=== CRON/TMUX ==='
           crontab -l 2>/dev/null || true
           tmux ls 2>/dev/null || true

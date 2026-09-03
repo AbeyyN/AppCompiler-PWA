@@ -27,8 +27,8 @@ jobs:
           "${GH_LOCAL[@]}" auth status >/dev/null 2>&1
 
           case "${RUNNER_NAME:-}" in
-            Fujitsu-PWA|Redmi-PWA) CURRENT_DIR='AppCompiler-PWA'; CURRENT_OLD='Fujitsu-PWA'; CURRENT_NEW='Redmi-PWA'; CURRENT_LABELS='redmi,pwa,central' ;;
-            Fujitsu-PWA-01|Redmi-PWA-01) CURRENT_DIR='AppCompiler-PWA-01'; CURRENT_OLD='Fujitsu-PWA-01'; CURRENT_NEW='Redmi-PWA-01'; CURRENT_LABELS='redmi,pwa,central' ;;
+            Redmi-PWA|Redmi-PWA) CURRENT_DIR='AppCompiler-PWA'; CURRENT_OLD='Redmi-PWA'; CURRENT_NEW='Redmi-PWA'; CURRENT_LABELS='redmi,pwa,central' ;;
+            Redmi-PWA-01|Redmi-PWA-01) CURRENT_DIR='AppCompiler-PWA-01'; CURRENT_OLD='Redmi-PWA-01'; CURRENT_NEW='Redmi-PWA-01'; CURRENT_LABELS='redmi,pwa,central' ;;
             *) echo "Unexpected AppCompiler runner: ${RUNNER_NAME:-unknown}"; exit 10 ;;
           esac
 
@@ -40,7 +40,7 @@ jobs:
 
           DIRS=(AppCompiler-PWA AppCompiler-PWA-01 OpenWRT---AbeyyWRT OpenWRT---AbeyyWRT-light SK-Gong-Kapas X7-Core-Academy XHomeNetwork XMA7 XSAHub XStay-Manager)
           REPOS=(AppCompiler-PWA AppCompiler-PWA OpenWRT---AbeyyWRT OpenWRT---AbeyyWRT SK-Gong-Kapas X7-Core-Academy XHomeNetwork XMA7 XSAHub XStay-Manager)
-          OLDN=(Fujitsu-PWA Fujitsu-PWA-01 Fujitsu-Ubuntu Fujitsu-Ubuntu-Light Fujitsu-Ubuntu Fujitsu-Ubuntu Fujitsu-Ubuntu Fujitsu-Ubuntu Fujitsu-Ubuntu Fujitsu-Ubuntu-XStay)
+          OLDN=(Redmi-PWA Redmi-PWA-01 Redmi-Ubuntu Redmi-Ubuntu-Light Redmi-Ubuntu Redmi-Ubuntu Redmi-Ubuntu Redmi-Ubuntu Redmi-Ubuntu Redmi-Ubuntu-XStay)
           NEWN=(Redmi-PWA Redmi-PWA-01 Redmi-Ubuntu Redmi-Ubuntu-Light Redmi-Ubuntu Redmi-Ubuntu Redmi-Ubuntu Redmi-Ubuntu Redmi-Ubuntu Redmi-Ubuntu-XStay)
           LABS=(redmi,pwa,central redmi,pwa,central redmi,openwrt,linux-build redmi,light,diagnostic redmi,android,pwa,flutter,api36,linux-build redmi,android,pwa,flutter,api36,linux-build redmi,android,pwa,flutter,api36,linux-build redmi,android,pwa,flutter,api36,linux-build redmi,android,pwa,flutter,api36,linux-build redmi,android,pwa,flutter,api36,linux-build)
           BACK="$HOME/.redmi-staged-backup-$(date +%Y%m%d-%H%M%S)"
@@ -151,10 +151,10 @@ jobs:
           online=0
           for q in \$(seq 1 50); do st="\$("\${GH_LOCAL[@]}" api "repos/AbeyyN/\$REPO/actions/runners" --jq ".runners[]? | select(.name==\\"\$NEW\\") | .status" | head -1 || true)"; [ "\$st" = online ] && { online=1; break; }; sleep 2; done
           [ "\$online" -eq 1 ] || { echo "FATAL_CURRENT_ONLINE \$NEW"; exit 41; }
-          rm -f "\$HOME/bin/fujitsu-job-started.sh" "\$HOME/bin/fujitsu-job-completed.sh" "\$HOME/.ssh/fujitsu-build-home"
+          rm -f "\$HOME/bin/redmi-job-started.sh" "\$HOME/bin/redmi-job-completed.sh" "\$HOME/.ssh/redmi-build-home"
           rm -f "\$HOME/bin"/start-all-github-runners.sh.bak.* "\$HOME/bin"/start-all-github-runners.sh.pre-* 2>/dev/null || true
-          find "\$HOME/bin" -maxdepth 1 -type f -name 'fujitsu-*' -delete 2>/dev/null || true
-          find "\$HOME/bin" -maxdepth 1 -type l -name 'fujitsu-*' -delete 2>/dev/null || true
+          find "\$HOME/bin" -maxdepth 1 -type f -name 'redmi-*' -delete 2>/dev/null || true
+          find "\$HOME/bin" -maxdepth 1 -type l -name 'redmi-*' -delete 2>/dev/null || true
           "\$HOME/bin/start-all-github-runners.sh" || true
           sleep 5
           total=0; onlinec=0; legacy=0
@@ -163,7 +163,7 @@ jobs:
             echo "\$j" | jq -r '.runners[]? | [.name,(.labels|map(.name)|join(",")),.status,.busy] | @tsv'
             total=\$((total+\$(jq '[.runners[]? | select(([.labels[]?.name]|index("redmi"))!=null)] | length' <<<"\$j")))
             onlinec=\$((onlinec+\$(jq '[.runners[]? | select((([.labels[]?.name]|index("redmi"))!=null) and .status=="online")] | length' <<<"\$j")))
-            legacy=\$((legacy+\$(jq '[.runners[]? | select((.name|test("Fujitsu|FUJITSU|fujitsu")) or (([.labels[]?.name]|index("fujitsu"))!=null))] | length' <<<"\$j")))
+            legacy=\$((legacy+\$(jq '[.runners[]? | select((.name|test("Redmi|REDMI|redmi")) or (([.labels[]?.name]|index("redmi"))!=null))] | length' <<<"\$j")))
           done
           echo "FINAL_FLEET REDMI=\$onlinec/\$total LEGACY=\$legacy"
           [ "\$total" -eq 10 ] && [ "\$onlinec" -eq 10 ] && [ "\$legacy" -eq 0 ]
@@ -173,7 +173,7 @@ jobs:
           import json,sys
           d=json.loads(sys.argv[1]); assert d.get('source')=='redmi-build'; assert d.get('dashboard_owner')=='rapsi-nas'; print('RASPI_DASHBOARD_OK',d.get('source'),d.get('dashboard_owner'))
           PY
-          [ -x "\$HOME/bin/redmi-telegram" ] && "\$HOME/bin/redmi-telegram" "✅ Redmi build migration COMPLETE\n\nHost: redmi-build\nGitHub runners: 10/10 online\nDashboard owner: rapsi-nas\nLegacy Fujitsu build identity: removed\n\nFujitsu lama selamat untuk dipasang semula sebagai fujitsu-server." || true
+          [ -x "\$HOME/bin/redmi-telegram" ] && "\$HOME/bin/redmi-telegram" "✅ Redmi build migration COMPLETE\n\nHost: redmi-build\nGitHub runners: 10/10 online\nDashboard owner: rapsi-nas\nLegacy Redmi build identity: removed\n\nRedmi lama selamat untuk dipasang semula sebagai redmi-server." || true
           echo "FINAL_CURRENT_PASS \$(date -Is)"
           EOF
           chmod 755 "$HOME/bin/redmi-final-current.sh"

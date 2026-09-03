@@ -12,14 +12,14 @@ permissions:
 
 jobs:
   configure:
-    runs-on: [self-hosted, linux, x64, fujitsu, pwa, central]
+    runs-on: [self-hosted, linux, x64, redmi, pwa, central]
     timeout-minutes: 15
     steps:
       - name: Configure persistent OMV SMB share for CI artifacts
         shell: bash
         run: |
           set -euo pipefail
-          KEY=/home/abeyy/.ssh/fujitsu-build-home
+          KEY=/home/abeyy/.ssh/redmi-build-home
           ssh -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new abeyy@192.168.1.99 'bash -s' <<'REMOTE'
           set -euo pipefail
           ROOT='/srv/dev-disk-by-uuid-e93f7a21-4a78-4f73-997a-78c11f6c647d/CI-Artifacts'
@@ -51,7 +51,7 @@ jobs:
           if [ -z "$sf_uuid" ]; then
             sf_uuid="$(python3 -c 'import uuid; print(uuid.uuid4())')"
           fi
-          jq -n --arg uuid "$sf_uuid" --arg mnt "$MNTREF" '{uuid:$uuid,name:"CI-Artifacts",comment:"AbeyyTechXy CI build artifacts - managed by Fujitsu compiler",mntentref:$mnt,reldirpath:"CI-Artifacts/",privileges:{privilege:[{type:"user",name:"abeyy",perms:7},{type:"user",name:"nzrl",perms:7},{type:"group",name:"users",perms:7}]}}' | sudo -n omv-confdbadm update conf.system.sharedfolder -
+          jq -n --arg uuid "$sf_uuid" --arg mnt "$MNTREF" '{uuid:$uuid,name:"CI-Artifacts",comment:"AbeyyTechXy CI build artifacts - managed by Redmi compiler",mntentref:$mnt,reldirpath:"CI-Artifacts/",privileges:{privilege:[{type:"user",name:"abeyy",perms:7},{type:"user",name:"nzrl",perms:7},{type:"group",name:"users",perms:7}]}}' | sudo -n omv-confdbadm update conf.system.sharedfolder -
           test "$(sudo -n omv-confdbadm read conf.system.sharedfolder | jq -r --arg u "$sf_uuid" '.[] | select(.uuid==$u) | .name')" = 'CI-Artifacts'
 
           smb_uuid="$(sudo -n omv-confdbadm read conf.service.smb.share | jq -r --arg ref "$sf_uuid" '.[] | select(.sharedfolderref==$ref) | .uuid' | head -1)"

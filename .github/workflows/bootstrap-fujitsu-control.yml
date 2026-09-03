@@ -1,84 +1,84 @@
-name: Bootstrap FUJITSU-CONTROL + Hermes
+name: Bootstrap REDMI-CONTROL + Hermes
 
 on:
   workflow_dispatch:
   push:
     branches: [main]
     paths:
-      - 'infra/fujitsu-control/**'
-      - '.github/workflows/bootstrap-fujitsu-control.yml'
+      - 'infra/redmi-control/**'
+      - '.github/workflows/bootstrap-redmi-control.yml'
 
 permissions:
   contents: read
 
 concurrency:
-  group: fujitsu-control-bootstrap
+  group: redmi-control-bootstrap
   cancel-in-progress: true
 
 jobs:
   bootstrap:
-    # Bootstrap delivery may use any local Fujitsu worker once. The installed
-    # FUJITSU-CONTROL runtime itself is local-only and is not a GitHub runner.
-    runs-on: [self-hosted, linux, x64, fujitsu]
+    # Bootstrap delivery may use any local Redmi worker once. The installed
+    # REDMI-CONTROL runtime itself is local-only and is not a GitHub runner.
+    runs-on: [self-hosted, linux, x64, redmi]
     timeout-minutes: 35
     steps:
       - name: Checkout control-plane source only
         uses: actions/checkout@v4
         with:
           sparse-checkout: |
-            infra/fujitsu-control
+            infra/redmi-control
           sparse-checkout-cone-mode: false
           fetch-depth: 1
 
-      - name: Install FUJITSU-CONTROL locally
+      - name: Install REDMI-CONTROL locally
         shell: bash
         run: |
           set -euo pipefail
-          src="infra/fujitsu-control/fujitsu-control.py"
-          dst="$HOME/fujitsu-control"
+          src="infra/redmi-control/redmi-control.py"
+          dst="$HOME/redmi-control"
           mkdir -p "$dst" "$HOME/bin"
           python3 -m py_compile "$src"
-          install -m 755 "$src" "$dst/fujitsu-control.py"
-          cat > "$HOME/bin/fujitsu-control" <<'EOF'
+          install -m 755 "$src" "$dst/redmi-control.py"
+          cat > "$HOME/bin/redmi-control" <<'EOF'
           #!/usr/bin/env bash
           set -euo pipefail
           export PATH="$HOME/.local/bin:$HOME/bin:$PATH"
           case "${1:-status}" in
             start)
-              tmux has-session -t fujitsu-control 2>/dev/null && exit 0
-              tmux new-session -d -s fujitsu-control "export PATH='$HOME/.local/bin:$HOME/bin:$PATH'; cd '$HOME/fujitsu-control'; exec python3 fujitsu-control.py >> '$HOME/fujitsu-control/control.log' 2>&1"
+              tmux has-session -t redmi-control 2>/dev/null && exit 0
+              tmux new-session -d -s redmi-control "export PATH='$HOME/.local/bin:$HOME/bin:$PATH'; cd '$HOME/redmi-control'; exec python3 redmi-control.py >> '$HOME/redmi-control/control.log' 2>&1"
               ;;
             restart)
-              tmux kill-session -t fujitsu-control 2>/dev/null || true
+              tmux kill-session -t redmi-control 2>/dev/null || true
               sleep 1
               exec "$0" start
               ;;
             stop)
-              tmux kill-session -t fujitsu-control 2>/dev/null || true
+              tmux kill-session -t redmi-control 2>/dev/null || true
               ;;
             status)
-              curl -fsS --max-time 3 http://127.0.0.1:9861/state || { echo 'FUJITSU-CONTROL offline'; exit 1; }
+              curl -fsS --max-time 3 http://127.0.0.1:9861/state || { echo 'REDMI-CONTROL offline'; exit 1; }
               ;;
             *)
-              echo "usage: fujitsu-control {start|stop|restart|status}" >&2
+              echo "usage: redmi-control {start|stop|restart|status}" >&2
               exit 2
               ;;
           esac
           EOF
-          chmod 755 "$HOME/bin/fujitsu-control"
+          chmod 755 "$HOME/bin/redmi-control"
 
-          tmux kill-session -t fujitsu-control 2>/dev/null || true
-          "$HOME/bin/fujitsu-control" start
+          tmux kill-session -t redmi-control 2>/dev/null || true
+          "$HOME/bin/redmi-control" start
           for _ in $(seq 1 20); do
             if curl -fsS --max-time 2 http://127.0.0.1:9861/healthz | grep -q '^ok'; then
-              echo FUJITSU_CONTROL_LOCAL_READY=1
+              echo REDMI_CONTROL_LOCAL_READY=1
               break
             fi
             sleep 1
           done
           curl -fsS --max-time 3 http://127.0.0.1:9861/healthz | grep -q '^ok'
           curl -fsS --max-time 5 http://127.0.0.1:9860/healthz | grep -q '^ok'
-          echo 'FUJITSU-CONTROL owns dashboard supervision locally; it is not a GitHub runner.'
+          echo 'REDMI-CONTROL owns dashboard supervision locally; it is not a GitHub runner.'
 
       - name: Repair Hermes managed runtime
         shell: bash
@@ -124,11 +124,11 @@ jobs:
           cat > "$workspace/.hermes.md" <<'EOF'
           # 986Network CI Doctor
 
-          You are the local CI reliability agent for FUJITSU-BUILD.
+          You are the local CI reliability agent for REDMI-BUILD.
           Diagnose GitHub Actions and build failures using minimal, reversible changes.
           Inspect logs and local runner state before changing anything.
           Check runner health, network/TLS, disk, Git, Java, Flutter, Android SDK, Gradle and OpenWrt toolchains when relevant.
-          Treat FUJITSU-CONTROL as the local control plane and the GitHub runners as compile workers.
+          Treat REDMI-CONTROL as the local control plane and the GitHub runners as compile workers.
           Prefer read/diagnose/test actions. Never reveal credentials, signing keys, tokens, auth files or .env values.
           Never force-push, rewrite history, delete branches/releases/repos, or alter router/NAS/firewall/SSH configuration without explicit approval.
           For repository writes, deployments, releases or destructive changes, explain the action and require explicit human approval.
@@ -237,12 +237,12 @@ jobs:
           raise SystemExit(f'Telegram bot API verification failed: {last}')
           PY
 
-      - name: Start Hermes gateway under FUJITSU-CONTROL
+      - name: Start Hermes gateway under REDMI-CONTROL
         shell: bash
         run: |
           set -euo pipefail
           export PATH="$HOME/.local/bin:$HOME/bin:$PATH"
-          "$HOME/bin/fujitsu-control" restart
+          "$HOME/bin/redmi-control" restart
           for _ in $(seq 1 30); do
             if tmux has-session -t hermes-gateway 2>/dev/null && pgrep -f 'hermes.*gateway' >/dev/null 2>&1; then
               sleep 5
@@ -255,10 +255,10 @@ jobs:
           done
           tmux has-session -t hermes-gateway
           pgrep -f 'hermes.*gateway' >/dev/null
-          curl -fsS --max-time 5 http://127.0.0.1:9861/state -o /tmp/fujitsu-control-state.json
+          curl -fsS --max-time 5 http://127.0.0.1:9861/state -o /tmp/redmi-control-state.json
           python3 - <<'PY'
           import json
-          d=json.load(open('/tmp/fujitsu-control-state.json'))
+          d=json.load(open('/tmp/redmi-control-state.json'))
           print('control_name=',d.get('name'))
           print('control_version=',d.get('version'))
           print('dashboard_healthy=',(d.get('dashboard') or {}).get('healthy'))
@@ -267,11 +267,11 @@ jobs:
           print('hermes_runtime_ready=',h.get('runtime_ready'))
           print('hermes_telegram_configured=',h.get('telegram_configured'))
           print('hermes_gateway_alive=',h.get('gateway_alive'))
-          if d.get('name')!='FUJITSU-CONTROL': raise SystemExit('wrong control plane')
+          if d.get('name')!='REDMI-CONTROL': raise SystemExit('wrong control plane')
           if not (d.get('dashboard') or {}).get('healthy'): raise SystemExit('dashboard unhealthy')
           if not h.get('installed'): raise SystemExit('Hermes not installed')
           if not h.get('runtime_ready'): raise SystemExit('Hermes runtime not ready')
           if not h.get('telegram_configured'): raise SystemExit('Hermes Telegram not configured')
           if not h.get('gateway_alive'): raise SystemExit('Hermes gateway not alive')
           PY
-          echo FUJITSU_CONTROL_AND_HERMES_READY=1
+          echo REDMI_CONTROL_AND_HERMES_READY=1

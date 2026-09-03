@@ -1,10 +1,10 @@
-name: Fujitsu Safe Host Tune
+name: Redmi Safe Host Tune
 
 on:
   push:
     branches: [main]
     paths:
-      - '.github/workflows/fujitsu-safe-host-tune.yml'
+      - '.github/workflows/redmi-safe-host-tune.yml'
   workflow_dispatch:
 
 permissions:
@@ -13,7 +13,7 @@ permissions:
 jobs:
   tune:
     name: Apply live-safe Gradle Git and listener tuning
-    runs-on: [self-hosted, linux, x64, fujitsu, pwa, central]
+    runs-on: [self-hosted, linux, x64, redmi, pwa, central]
     timeout-minutes: 10
     steps:
       - name: Apply optimized Gradle profile

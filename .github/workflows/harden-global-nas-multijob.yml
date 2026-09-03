@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   harden:
-    runs-on: [self-hosted, linux, x64, fujitsu, pwa, central]
+    runs-on: [self-hosted, linux, x64, redmi, pwa, central]
     timeout-minutes: 15
     steps:
       - name: Make collector state job-aware and persist source
@@ -35,7 +35,7 @@ jobs:
           import sys
           p=Path(sys.argv[1]); s=p.read_text()
           if 'JOB="${GITHUB_JOB:-job}"' not in s:
-              s=s.replace('RUNNER="${RUNNER_NAME:-Fujitsu-Ubuntu}"\n', 'RUNNER="${RUNNER_NAME:-Fujitsu-Ubuntu}"\nJOB="${GITHUB_JOB:-job}"\n')
+              s=s.replace('RUNNER="${RUNNER_NAME:-Redmi-Ubuntu}"\n', 'RUNNER="${RUNNER_NAME:-Redmi-Ubuntu}"\nJOB="${GITHUB_JOB:-job}"\n')
           if 'safe_job="${JOB//[^A-Za-z0-9_.-]/_}"' not in s:
               s=s.replace('safe_runner="${RUNNER//[^A-Za-z0-9_.-]/_}"\n', 'safe_runner="${RUNNER//[^A-Za-z0-9_.-]/_}"\nsafe_job="${JOB//[^A-Za-z0-9_.-]/_}"\n')
           s=s.replace('state="$STATE_DIR/${REPO//\\//__}-${RUN_ID}-${safe_runner}.done"', 'state="$STATE_DIR/${REPO//\\//__}-${RUN_ID}-${safe_runner}-${safe_job}.done"')
@@ -49,8 +49,8 @@ jobs:
           grep -Fq '"job":"$JOB"' "$src"
 
           # Protect current runner immediately.
-          install -m 0755 "$src" "$HOME/bin/fujitsu-nas-artifact-store"
-          bash -n "$HOME/bin/fujitsu-nas-artifact-store"
+          install -m 0755 "$src" "$HOME/bin/redmi-nas-artifact-store"
+          bash -n "$HOME/bin/redmi-nas-artifact-store"
 
           # Persist source of truth with retry.
           b64="$(base64 -w0 "$src")"
@@ -67,12 +67,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          grep -q 'fujitsu-nas-artifact-store' "$HOME/bin/fujitsu-job-completed.sh"
+          grep -q 'redmi-nas-artifact-store' "$HOME/bin/redmi-job-completed.sh"
           count=0; bad=0
           for d in "$HOME"/actions-runner/*; do
             [ -f "$d/.runner" ] || continue
             count=$((count+1))
-            grep -q '^ACTIONS_RUNNER_HOOK_JOB_COMPLETED=.*/fujitsu-job-completed.sh$' "$d/.env" || bad=$((bad+1))
+            grep -q '^ACTIONS_RUNNER_HOOK_JOB_COMPLETED=.*/redmi-job-completed.sh$' "$d/.env" || bad=$((bad+1))
           done
           echo "RUNNERS=$count BAD=$bad"
           test "$count" -eq 10
@@ -82,16 +82,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          source "$HOME/.config/fujitsu-runner/nas-artifacts.env"
+          source "$HOME/.config/redmi-runner/nas-artifacts.env"
           a="$RUNNER_TEMP/multi-a"; b="$RUNNER_TEMP/multi-b"
           rm -rf "$a" "$b"; mkdir -p "$a" "$b/build/web"
           printf first > "$a/first-release.apk"
           printf '<title>second</title>' > "$b/build/web/index.html"
           run="multijob-${GITHUB_RUN_ID}-$(date +%s)"
           repo='AbeyyN/__nas-multijob-smoke__'
-          GITHUB_WORKSPACE="$a" GITHUB_REPOSITORY="$repo" GITHUB_RUN_ID="$run" GITHUB_JOB='android' GITHUB_SHA=a GITHUB_REF_NAME=main GITHUB_REF_TYPE=branch RUNNER_NAME="${RUNNER_NAME:-Fujitsu-PWA-01}" "$HOME/bin/fujitsu-nas-artifact-store" success "$repo" smoke main "$run"
-          GITHUB_WORKSPACE="$b" GITHUB_REPOSITORY="$repo" GITHUB_RUN_ID="$run" GITHUB_JOB='pwa' GITHUB_SHA=b GITHUB_REF_NAME=main GITHUB_REF_TYPE=branch RUNNER_NAME="${RUNNER_NAME:-Fujitsu-PWA-01}" "$HOME/bin/fujitsu-nas-artifact-store" success "$repo" smoke main "$run"
-          "$HOME/bin/fujitsu-nas-ssh" -o BatchMode=yes "$PI_USER@$PI_HOST" "CI_ROOT='$CI_ROOT' bash -s" <<'REMOTE'
+          GITHUB_WORKSPACE="$a" GITHUB_REPOSITORY="$repo" GITHUB_RUN_ID="$run" GITHUB_JOB='android' GITHUB_SHA=a GITHUB_REF_NAME=main GITHUB_REF_TYPE=branch RUNNER_NAME="${RUNNER_NAME:-Redmi-PWA-01}" "$HOME/bin/redmi-nas-artifact-store" success "$repo" smoke main "$run"
+          GITHUB_WORKSPACE="$b" GITHUB_REPOSITORY="$repo" GITHUB_RUN_ID="$run" GITHUB_JOB='pwa' GITHUB_SHA=b GITHUB_REF_NAME=main GITHUB_REF_TYPE=branch RUNNER_NAME="${RUNNER_NAME:-Redmi-PWA-01}" "$HOME/bin/redmi-nas-artifact-store" success "$repo" smoke main "$run"
+          "$HOME/bin/redmi-nas-ssh" -o BatchMode=yes "$PI_USER@$PI_HOST" "CI_ROOT='$CI_ROOT' bash -s" <<'REMOTE'
           set -euo pipefail
           test -f "$CI_ROOT/Apps/Android/__nas-multijob-smoke__/latest/__nas-multijob-smoke__-latest.apk"
           find "$CI_ROOT/Apps/PWA/__nas-multijob-smoke__/latest" -maxdepth 1 -type f \( -name '*.zip' -o -name '*.tar.gz' \) | grep -q .

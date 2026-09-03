@@ -1,18 +1,18 @@
-name: Fujitsu Dashboard Inventory
+name: Redmi Dashboard Inventory
 
 on:
   workflow_dispatch:
   push:
     branches: [main]
     paths:
-      - '.github/workflows/fujitsu-dashboard-inventory.yml'
+      - '.github/workflows/redmi-dashboard-inventory.yml'
 
 permissions:
   contents: read
 
 jobs:
   inspect:
-    runs-on: [self-hosted, linux, x64, fujitsu, pwa, central]
+    runs-on: [self-hosted, linux, x64, redmi, pwa, central]
     timeout-minutes: 5
     steps:
       - name: Inspect dashboard and runners safely
@@ -47,8 +47,8 @@ jobs:
             echo "listener_pid=$pid cwd=$(readlink -f /proc/$pid/cwd 2>/dev/null || true)"
           done
 
-          dash="$HOME/fujitsu-dashboard/dashboard_server.py"
-          index="$HOME/fujitsu-dashboard/index.html"
+          dash="$HOME/redmi-dashboard/dashboard_server.py"
+          index="$HOME/redmi-dashboard/index.html"
           echo '=== DASHBOARD SERVER 261+ ==='
           test -f "$dash"
           sed -n '261,900p' "$dash"
