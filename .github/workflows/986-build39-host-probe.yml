@@ -1,0 +1,52 @@
+name: 986 Build39 Host Probe
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/986-build39-host-probe.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: [self-hosted, linux, x64, redmi, pwa, central]
+    timeout-minutes: 4
+    steps:
+      - name: Read-only Build39 host probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          export HOME=/home/abeyy
+          test "$(hostname)" = redmi-build
+          echo "PROBE_RUNNER=$RUNNER_NAME HOST=$(hostname)"
+          echo '=== SCHEDULER ==='
+          for d in "$HOME/.local/share/986-scheduler/active" "$HOME/.local/share/986-scheduler/requests"; do
+            echo "[$d]"
+            if [ -d "$d" ]; then
+              for f in "$d"/*; do
+                [ -f "$f" ] || continue
+                awk -F '\t' '{printf "priority=%s ts=%s pid=%s class=%s repo=%s workflow=%s event=%s branch=%s command=%s\n",$1,$2,$3,$4,$5,$6,$7,$8,$9}' "$f" || true
+              done
+            fi
+          done
+          echo '=== BUILD39 PROCESS TREE ==='
+          ps -eo pid,ppid,etime,%cpu,%mem,stat,args --sort=-%cpu \
+            | grep -E '986-build-lock|build\.sh|make( |$)|cc1|cc1plus|ld( |$)|ninja|cmake|OpenWRT---AbeyyWRT' \
+            | grep -v grep | head -80 || true
+          echo '=== WORKTREE ACTIVITY ==='
+          root="$HOME/runner-work/OpenWRT---AbeyyWRT"
+          [ -d "$root" ] || root="$HOME/actions-runner/OpenWRT---AbeyyWRT/_work/OpenWRT---AbeyyWRT"
+          if [ -d "$root" ]; then
+            find "$root" -type f -mmin -10 -printf '%TY-%Tm-%Td %TH:%TM:%TS %s %p\n' 2>/dev/null \
+              | sort -r | head -40 || true
+          fi
+          echo '=== RESOURCES ==='
+          uptime
+          free -h
+          df -h /
+          echo '=== DASHBOARD API ==='
+          curl -fsS --max-time 5 http://127.0.0.1:9860/api/status \
+            | python3 -c 'import json,sys; d=json.load(sys.stdin); print("summary=",d.get("summary")); print("health=",d.get("health")); [print(p.get("repo"), "active=", [(r.get("name"), r.get("status"), (r.get("action") or {}).get("state"), (r.get("action") or {}).get("current_step")) for r in p.get("active",[])]) for p in d.get("projects",[]) if p.get("repo")=="OpenWRT---AbeyyWRT"]' || true
+          echo BUILD39_HOST_PROBE=PASS
