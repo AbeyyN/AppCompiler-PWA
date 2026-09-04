@@ -25,14 +25,23 @@ jobs:
           for repo in AppCompiler-PWA OpenWRT---AbeyyWRT SK-Gong-Kapas X7-Core-Academy XHomeNetwork XMA7 XSAHub XStay-Manager; do
             j="$("${GH_LOCAL[@]}" api "repos/AbeyyN/$repo/actions/runners")"
             echo "$j" | jq -r '.runners[]? | [.name,(.labels|map(.name)|join(",")),.status,.busy] | @tsv'
-            total=$((total+$(jq '[.runners[]? | select(([.labels[]?.name]|index("redmi"))!=null)]|length' <<<"$j")))
-            online=$((online+$(jq '[.runners[]? | select((([.labels[]?.name]|index("redmi"))!=null) and .status=="online")]|length' <<<"$j")))
-            legacy=$((legacy+$(jq '[.runners[]? | select((.name|test("Fujitsu|FUJITSU|fujitsu")) or (([.labels[]?.name]|index("fujitsu"))!=null))]|length' <<<"$j")))
+            total=$((total+$(jq '[.runners[]? | select(([.labels[]?.name]|map(ascii_downcase)|index("redmi"))!=null)]|length' <<<"$j")))
+            online=$((online+$(jq '[.runners[]? | select((([.labels[]?.name]|map(ascii_downcase)|index("redmi"))!=null) and .status=="online")]|length' <<<"$j")))
+            legacy=$((legacy+$(jq '[.runners[]? | select((.name|ascii_downcase|contains("fujitsu")) or (([.labels[]?.name]|map(ascii_downcase)|index("fujitsu"))!=null))]|length' <<<"$j")))
           done
           echo "FLEET=$online/$total LEGACY=$legacy"
           [ "$online" -eq 10 ] && [ "$total" -eq 10 ] && [ "$legacy" -eq 0 ]
           echo "LOCAL_LISTENERS=$(pgrep -fc 'Runner.Listener run' || true)"
           [ "$(pgrep -fc 'Runner.Listener run' || true)" -eq 10 ]
+
+          echo '=== PERSISTENT RUNNER SERVICES ==='
+          dirs=(AppCompiler-PWA AppCompiler-PWA-01 OpenWRT---AbeyyWRT OpenWRT---AbeyyWRT-light SK-Gong-Kapas X7-Core-Academy XHomeNetwork XMA7 XSAHub XStay-Manager)
+          for dir in "${dirs[@]}"; do
+            unit="redmi-runner@$dir.service"
+            systemctl is-enabled "$unit"
+            systemctl is-active "$unit"
+            echo "PERSISTENT_OK=$unit"
+          done
 
           echo '=== TELEMETRY V3 ==='
           sleep 5
@@ -43,7 +52,7 @@ jobs:
           d=json.loads(sys.argv[1]); s=d.get('system') or {}; m=s.get('memory') or {}; di=s.get('disk') or {}; su=d.get('summary') or {}
           print('VERSION',d.get('version'),'CPU',s.get('cpu_percent'),'RAM',m.get('percent'),'DISK',di.get('percent'),'PROC',s.get('processes'))
           print('RUNNERS',su.get('runner_online'),su.get('runner_total'),'PROJECTS',len(d.get('projects') or []),'HISTORY',len(d.get('history') or []),'QUEUE',len(d.get('queue') or []),'RUNS',len(d.get('runs') or []))
-          assert d.get('version')=='redmi-telemetry-3.0'
+          assert str(d.get('version') or '').startswith('redmi-telemetry-3.')
           assert d.get('source')=='redmi-build' and d.get('dashboard_owner')=='rapsi-nas'
           assert s.get('cpu_percent') is not None
           assert m.get('percent') is not None and di.get('percent') is not None and s.get('processes') is not None
@@ -53,13 +62,19 @@ jobs:
           PY
 
           echo '=== RASPI DASHBOARD ==='
-          curl -fsS http://192.168.1.99:9860/health; echo
+          curl -fsS -o /tmp/raspi-health -w 'HTTP=%{http_code}\n' http://192.168.1.99:9860/health | grep -q 'HTTP=200'
+          cat /tmp/raspi-health; echo
           D="$(curl -fsS http://192.168.1.99:9860/api/status)"
           python3 - "$D" <<'PY'
           import json,sys
           d=json.loads(sys.argv[1]); print('OWNER',d.get('dashboard_owner'),'SOURCE',d.get('source'),'VERSION',d.get('version'))
           assert d.get('source')=='redmi-build' and d.get('dashboard_owner')=='rapsi-nas'
-          assert d.get('version')=='redmi-telemetry-3.0'
+          assert str(d.get('version') or '').startswith('redmi-telemetry-3.')
+          s=d.get('system') or {}; m=s.get('memory') or {}; di=s.get('disk') or {}; su=d.get('summary') or {}
+          assert s.get('cpu_percent') is not None and m.get('percent') is not None
+          assert di.get('percent') is not None and s.get('processes') is not None
+          assert su.get('runner_total')==10 and su.get('runner_online')==10
+          assert len(d.get('history') or [])>0
           PY
           H="$(curl -fsS http://192.168.1.99:9860/)"
           grep -q 'Redmi Build Command Center' <<<"$H"
@@ -75,7 +90,7 @@ jobs:
           rid="$(jq -r '.workflow_runs[0].id' <<<"$run")"
           jobs="$("${GH_LOCAL[@]}" api "repos/AbeyyN/AppCompiler-PWA/actions/runs/$rid/jobs")"
           echo "$jobs" | jq -r '.jobs[]? | [.name,.status,.conclusion,.runner_name,(.labels|join(","))] | @tsv'
-          jq -e '.jobs[]? | select(.runner_name|startswith("Redmi-"))' <<<"$jobs" >/dev/null
+          jq -e '.jobs[]? | select((.runner_name|ascii_downcase|startswith("redmi-")) and .conclusion=="success")' <<<"$jobs" >/dev/null
 
           echo '=== BUILD DEPENDENCIES ==='
           for x in flutter dart adb sdkmanager git gh jq node npm java javac cmake ninja make gcc g++ rsync unzip zip xsltproc; do
