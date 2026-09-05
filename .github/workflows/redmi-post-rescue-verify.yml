@@ -35,17 +35,32 @@ jobs:
           done
           echo "FLEET=$online/$total LEGACY=$legacy"
           [ "$online" -eq 10 ] && [ "$total" -eq 10 ] && [ "$legacy" -eq 0 ]
-          echo "LOCAL_LISTENERS=$(pgrep -fc 'Runner.Listener run' || true)"
-          [ "$(pgrep -fc 'Runner.Listener run' || true)" -eq 10 ]
+          listeners="$(pgrep -fc 'Runner.Listener run' || true)"
+          echo "LOCAL_LISTENERS=$listeners"
+          [ "$listeners" -eq 10 ]
 
           echo '=== PERSISTENT RUNNER SERVICES ==='
-          dirs=(AppCompiler-PWA AppCompiler-PWA-01 OpenWRT---AbeyyWRT OpenWRT---AbeyyWRT-light SK-Gong-Kapas X7-Core-Academy XHomeNetwork XMA7 XSAHub XStay-Manager)
-          for dir in "${dirs[@]}"; do
-            unit="redmi-runner@$dir.service"
-            systemctl is-enabled "$unit"
-            systemctl is-active "$unit"
-            echo "PERSISTENT_OK=$unit"
+          mapfile -t units < <(systemctl list-unit-files --type=service --state=enabled --no-legend 2>/dev/null | awk '{print $1}' | grep -Ei '(^redmi-runner@|actions\.runner\.)' || true)
+          printf 'ENABLED_CANDIDATE=%s\n' "${units[@]:-none}"
+          persistent=0; legacy_units=0
+          for unit in "${units[@]}"; do
+            [ -n "$unit" ] || continue
+            low="${unit,,}"
+            if [[ "$low" == *fujitsu* ]]; then
+              legacy_units=$((legacy_units+1))
+              echo "LEGACY_UNIT=$unit"
+              continue
+            fi
+            if systemctl is-active --quiet "$unit"; then
+              show="$(systemctl show "$unit" -p ExecStart -p FragmentPath -p ActiveState -p SubState --no-pager 2>/dev/null || true)"
+              if grep -Eq 'RunnerService|Runner\.Listener|runsvc\.sh|run\.sh' <<<"$show"; then
+                persistent=$((persistent+1))
+                echo "PERSISTENT_OK=$unit"
+              fi
+            fi
           done
+          echo "PERSISTENT_COUNT=$persistent LEGACY_UNITS=$legacy_units"
+          [ "$persistent" -eq 10 ] && [ "$legacy_units" -eq 0 ]
 
           echo '=== TELEMETRY V3 ==='
           sleep 5
